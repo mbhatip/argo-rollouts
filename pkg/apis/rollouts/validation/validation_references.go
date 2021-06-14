@@ -3,15 +3,8 @@ package validation
 import (
 	"fmt"
 
-	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	analysisutil "github.com/argoproj/argo-rollouts/utils/analysis"
-	"github.com/argoproj/argo-rollouts/utils/conditions"
-	serviceutil "github.com/argoproj/argo-rollouts/utils/service"
-
-	ingressutil "github.com/argoproj/argo-rollouts/utils/ingress"
 	routev1 "github.com/openshift/api/route/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -96,7 +89,7 @@ func ValidateRolloutReferencedResources(rollout *v1alpha1.Rollout, referencedRes
 		allErrs = append(allErrs, ValidateAppMeshResource(appmeshRes)...)
 	}
 	for _, route := range referencedResources.OpenshiftRoutes {
-		allErrs = append(allErrs, ValidateOpenshiftRoute(rollout, route)...)
+		allErrs = append(allErrs, ValidateOpenshiftRoute(rollout, &route)...)
 	}
 	return allErrs
 }
