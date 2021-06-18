@@ -89,7 +89,7 @@ func ValidateRolloutReferencedResources(rollout *v1alpha1.Rollout, referencedRes
 		allErrs = append(allErrs, ValidateAppMeshResource(appmeshRes)...)
 	}
 	for _, route := range referencedResources.OpenshiftRoutes {
-		allErrs = append(allErrs, ValidateOpenshiftRoute(rollout, &route)...)
+		allErrs = append(allErrs, ValidateOpenshiftRoute(rollout, route)...)
 	}
 	return allErrs
 }
@@ -411,7 +411,7 @@ func ValidateAppMeshVirtualRouter(vrouter *unstructured.Unstructured) *field.Err
 	return nil
 }
 
-func ValidateOpenshiftRoute(rollout *v1alpha1.Rollout, route *routev1.Route) field.ErrorList {
+func ValidateOpenshiftRoute(rollout *v1alpha1.Rollout, route routev1.Route) field.ErrorList {
 	allErrs := field.ErrorList{}
 	fldPath := field.NewPath("spec", "to", "name")
 	defaultBackend := route.Spec.To.Name

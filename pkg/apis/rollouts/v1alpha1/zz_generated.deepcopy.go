@@ -2282,7 +2282,6 @@ func (in *RolloutTrafficRouting) DeepCopyInto(out *RolloutTrafficRouting) {
 		*out = new(AmbassadorTrafficRouting)
 		(*in).DeepCopyInto(*out)
 	}
-<<<<<<< HEAD
 	if in.AppMesh != nil {
 		in, out := &in.AppMesh, &out.AppMesh
 		*out = new(AppMeshTrafficRouting)
@@ -2298,13 +2297,6 @@ func (in *RolloutTrafficRouting) DeepCopyInto(out *RolloutTrafficRouting) {
 		*out = make([]MangedRoutes, len(*in))
 		copy(*out, *in)
 	}
-=======
-	if in.Openshift != nil {
-		in, out := &in.Openshift, &out.Openshift
-		*out = new(OpenshiftTrafficRouting)
-		(*in).DeepCopyInto(*out)
-	}
->>>>>>> 3a6ba84d (feat: Add Openshift routing as traffic manager)
 	return
 }
 

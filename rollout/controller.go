@@ -634,14 +634,12 @@ func (c *rolloutContext) getOpenshiftRoutes() ([]routev1.Route, error) {
 	if c.rollout.Spec.Strategy.Canary != nil {
 		canary := c.rollout.Spec.Strategy.Canary
 		if canary.TrafficRouting != nil && canary.TrafficRouting.Openshift != nil {
-			a := canary.TrafficRouting.Openshift
+			routeNames := canary.TrafficRouting.Openshift.Routes
 			fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting", "openshift", "routes")
-			if len(a.Routes) == 0 {
+			if len(routeNames) == 0 {
 				return nil, field.Invalid(fldPath, nil, "must provide at least one route")
 			}
-			for _, routeName := range a.Routes {
-
-				c.openshiftclientset.RouteV1()
+			for _, routeName := range routeNames {
 				route, err := c.openshiftclientset.RouteV1().
 					Routes(c.rollout.GetNamespace()).
 					Get(context.Background(), routeName, metav1.GetOptions{})
