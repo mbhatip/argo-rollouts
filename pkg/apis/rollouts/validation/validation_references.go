@@ -83,6 +83,9 @@ func ValidateRolloutReferencedResources(rollout *v1alpha1.Rollout, referencedRes
 	for _, mapping := range referencedResources.AmbassadorMappings {
 		allErrs = append(allErrs, ValidateAmbassadorMapping(mapping)...)
 	}
+	for _, route := range referencedResources.OpenshiftRoutes {
+		allErrs = append(allErrs, ValidateOpenshiftRoute(rollout, route)...)
+	}
 	return allErrs
 }
 
@@ -249,7 +252,7 @@ func ValidateAmbassadorMapping(obj unstructured.Unstructured) field.ErrorList {
 	return allErrs
 }
 
-func ValidateOpenshiftRoute(rollout *v1alpha1.Rollout, route *routev1.Route) field.ErrorList {
+func ValidateOpenshiftRoute(rollout *v1alpha1.Rollout, route routev1.Route) field.ErrorList {
 	allErrs := field.ErrorList{}
 	fldPath := field.NewPath("spec", "to", "name")
 	defaultBackend := route.Spec.To.Name

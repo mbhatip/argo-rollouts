@@ -171,6 +171,7 @@ func NewController(cfg ControllerConfig) *Controller {
 		argoprojclientset:             cfg.ArgoProjClientset,
 		dynamicclientset:              cfg.DynamicClientSet,
 		smiclientset:                  cfg.SmiClientSet,
+		openshiftclientset:            cfg.OpenshiftClientSet,
 		replicaSetLister:              cfg.ReplicaSetInformer.Lister(),
 		replicaSetSynced:              cfg.ReplicaSetInformer.Informer().HasSynced,
 		rolloutsInformer:              cfg.RolloutsInformer.Informer(),
@@ -544,24 +545,22 @@ func (c *rolloutContext) getRolloutReferencedResources() (*validation.Referenced
 	if err != nil {
 		return nil, err
 	}
-	refResources.OpenshiftRoutes = openshiftRoutes
+	refResources.OpenshiftRoutes = *openshiftRoutes
 
 	return &refResources, nil
 }
 
-func (c *rolloutContext) getOpenshiftRoutes() ([]routev1.Route, error) {
+func (c *rolloutContext) getOpenshiftRoutes() (*[]routev1.Route, error) {
 	routes := []routev1.Route{}
 	if c.rollout.Spec.Strategy.Canary != nil {
 		canary := c.rollout.Spec.Strategy.Canary
 		if canary.TrafficRouting != nil && canary.TrafficRouting.Openshift != nil {
-			a := canary.TrafficRouting.Openshift
+			routeNames := canary.TrafficRouting.Openshift.Routes
 			fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting", "openshift", "routes")
-			if len(a.Routes) == 0 {
+			if len(routeNames) == 0 {
 				return nil, field.Invalid(fldPath, nil, "must provide at least one route")
 			}
-			for _, routeName := range a.Routes {
-
-				c.openshiftclientset.RouteV1()
+			for _, routeName := range routeNames {
 				route, err := c.openshiftclientset.RouteV1().
 					Routes(c.rollout.GetNamespace()).
 					Get(context.Background(), routeName, metav1.GetOptions{})
@@ -575,7 +574,7 @@ func (c *rolloutContext) getOpenshiftRoutes() ([]routev1.Route, error) {
 			}
 		}
 	}
-	return routes, nil
+	return &routes, nil
 }
 
 func (c *rolloutContext) getAmbassadorMappings() ([]unstructured.Unstructured, error) {
