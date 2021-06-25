@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/argoproj/argo-rollouts/utils/queue"
 	"github.com/argoproj/notifications-engine/pkg/api"
 	"github.com/argoproj/notifications-engine/pkg/controller"
+	openshiftclientset "github.com/openshift/client-go/route/clientset/versioned"
 	"github.com/pkg/errors"
-  openshiftclientset "github.com/openshift/client-go/route/clientset/versioned"
 	smiclientset "github.com/servicemeshinterface/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
