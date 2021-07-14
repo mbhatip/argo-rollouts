@@ -95,8 +95,6 @@ type Manager struct {
 
 	refResolver rollout.TemplateRefResolver
 
-	dynamicClientSet dynamic.Interface
-
 	namespace string
 }
 
@@ -118,6 +116,7 @@ func NewManager(
 	analysisRunInformer informers.AnalysisRunInformer,
 	analysisTemplateInformer informers.AnalysisTemplateInformer,
 	clusterAnalysisTemplateInformer informers.ClusterAnalysisTemplateInformer,
+	istioPrimaryDynamicClient dynamic.Interface,
 	istioVirtualServiceInformer cache.SharedIndexInformer,
 	istioDestinationRuleInformer cache.SharedIndexInformer,
 	configMapInformer coreinformers.ConfigMapInformer,
@@ -150,7 +149,7 @@ func NewManager(
 	serviceWorkqueue := workqueue.NewNamedRateLimitingQueue(queue.DefaultArgoRolloutsRateLimiter(), "Services")
 	ingressWorkqueue := workqueue.NewNamedRateLimitingQueue(queue.DefaultArgoRolloutsRateLimiter(), "Ingresses")
 
-	refResolver := rollout.NewInformerBasedWorkloadRefResolver(namespace, dynamicclientset, discoveryClient, rolloutWorkqueue, rolloutsInformer.Informer())
+	refResolver := rollout.NewInformerBasedWorkloadRefResolver(namespace, dynamicclientset, discoveryClient, argoprojclientset, rolloutsInformer.Informer())
 	apiFactory := api.NewFactory(record.NewAPIFactorySettings(), defaults.Namespace(), secretInformer.Informer(), configMapInformer.Informer())
 	recorder := record.NewEventRecorder(kubeclientset, metrics.MetricRolloutEventsTotal, apiFactory)
 	notificationsController := controller.NewController(dynamicclientset.Resource(v1alpha1.RolloutGVR), rolloutsInformer.Informer(), apiFactory,
@@ -180,6 +179,7 @@ func NewManager(
 		AnalysisRunInformer:             analysisRunInformer,
 		AnalysisTemplateInformer:        analysisTemplateInformer,
 		ClusterAnalysisTemplateInformer: clusterAnalysisTemplateInformer,
+		IstioPrimaryDynamicClient:       istioPrimaryDynamicClient,
 		IstioVirtualServiceInformer:     istioVirtualServiceInformer,
 		IstioDestinationRuleInformer:    istioDestinationRuleInformer,
 		ReplicaSetInformer:              replicaSetInformer,
@@ -269,7 +269,6 @@ func NewManager(
 		experimentController:          experimentController,
 		analysisController:            analysisController,
 		notificationsController:       notificationsController,
-		dynamicClientSet:              dynamicclientset,
 		refResolver:                   refResolver,
 		namespace:                     namespace,
 	}

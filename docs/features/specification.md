@@ -309,3 +309,9 @@ status:
   - reason: AnalysisRunInconclusive
     startTime: 2019-10-00T1234 
 ```
+## Examples
+
+You can find examples of Rollouts at:
+
+ * The [example directory](https://github.com/argoproj/argo-rollouts/tree/master/examples)
+ * The [Argo Rollouts Demo application](https://github.com/argoproj/rollouts-demo)

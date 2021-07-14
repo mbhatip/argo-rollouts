@@ -30,7 +30,6 @@ import (
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/smi"
 	controllerutil "github.com/argoproj/argo-rollouts/utils/controller"
 	"github.com/argoproj/argo-rollouts/utils/defaults"
-	"github.com/argoproj/argo-rollouts/utils/istio"
 	istioutil "github.com/argoproj/argo-rollouts/utils/istio"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
 	"github.com/argoproj/argo-rollouts/utils/tolerantinformer"
@@ -85,7 +84,7 @@ func newCommand() *cobra.Command {
 			stopCh := signals.SetupSignalHandler()
 
 			alb.SetDefaultVerifyWeight(albVerifyWeight)
-			istio.SetIstioAPIVersion(istioVersion)
+			istioutil.SetIstioAPIVersion(istioVersion)
 			ambassador.SetAPIVersion(ambassadorVersion)
 			smi.SetSMIAPIVersion(trafficSplitVersion)
 
@@ -98,8 +97,6 @@ func newCommand() *cobra.Command {
 				namespace = configNS
 				log.Infof("Using namespace %s", namespace)
 			}
-			k8sRequestProvider := &metrics.K8sRequestsCountProvider{}
-			kubeclientmetrics.AddMetricsTransportWrapper(config, k8sRequestProvider.IncKubernetesRequest)
 
 			kubeClient, err := kubernetes.NewForConfig(config)
 			checkError(err)
@@ -138,7 +135,11 @@ func newCommand() *cobra.Command {
 			// a single namespace (i.e. rollouts-controller --namespace foo).
 			clusterDynamicInformerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynamicClient, resyncDuration, metav1.NamespaceAll, instanceIDTweakListFunc)
 			// 3. We finally need an istio dynamic informer factory which does not use a tweakListFunc.
-			istioDynamicInformerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynamicClient, resyncDuration, namespace, nil)
+			_, istioPrimaryDynamicClient := istioutil.GetPrimaryClusterDynamicClient(kubeClient, namespace)
+			if istioPrimaryDynamicClient == nil {
+				istioPrimaryDynamicClient = dynamicClient
+			}
+			istioDynamicInformerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(istioPrimaryDynamicClient, resyncDuration, namespace, nil)
 
 			controllerNamespaceInformerFactory := kubeinformers.NewSharedInformerFactoryWithOptions(
 				kubeClient,
@@ -146,6 +147,10 @@ func newCommand() *cobra.Command {
 				kubeinformers.WithNamespace(defaults.Namespace()))
 			configMapInformer := controllerNamespaceInformerFactory.Core().V1().ConfigMaps()
 			secretInformer := controllerNamespaceInformerFactory.Core().V1().Secrets()
+
+			k8sRequestProvider := &metrics.K8sRequestsCountProvider{}
+			kubeclientmetrics.AddMetricsTransportWrapper(config, k8sRequestProvider.IncKubernetesRequest)
+
 			cm := controller.NewManager(
 				namespace,
 				kubeClient,
@@ -163,6 +168,7 @@ func newCommand() *cobra.Command {
 				tolerantinformer.NewTolerantAnalysisRunInformer(dynamicInformerFactory),
 				tolerantinformer.NewTolerantAnalysisTemplateInformer(dynamicInformerFactory),
 				tolerantinformer.NewTolerantClusterAnalysisTemplateInformer(clusterDynamicInformerFactory),
+				istioPrimaryDynamicClient,
 				istioDynamicInformerFactory.ForResource(istioutil.GetIstioVirtualServiceGVR()).Informer(),
 				istioDynamicInformerFactory.ForResource(istioutil.GetIstioDestinationRuleGVR()).Informer(),
 				configMapInformer,
@@ -184,7 +190,7 @@ func newCommand() *cobra.Command {
 			jobInformerFactory.Start(stopCh)
 
 			// Check if Istio installed on cluster before starting dynamicInformerFactory
-			if istioutil.DoesIstioExist(dynamicClient, namespace) {
+			if istioutil.DoesIstioExist(istioPrimaryDynamicClient, namespace) {
 				istioDynamicInformerFactory.Start(stopCh)
 			}
 
