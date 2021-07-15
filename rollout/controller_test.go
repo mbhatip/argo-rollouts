@@ -96,7 +96,6 @@ type fixture struct {
 	replicaSetLister              []*appsv1.ReplicaSet
 	serviceLister                 []*corev1.Service
 	ingressLister                 []*extensionsv1beta1.Ingress
-	routeLister                   []*routev1.Route
 	// Actions expected to happen on the client.
 	kubeactions []core.Action
 	actions     []core.Action
