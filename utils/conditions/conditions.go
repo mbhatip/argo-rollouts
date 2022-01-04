@@ -9,12 +9,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/utils/defaults"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 )
 
 const (
@@ -52,7 +52,7 @@ const (
 	//NewReplicaSetMessage is added in a rollout when it creates a new replicas set.
 	NewReplicaSetMessage = "Created new replica set %q"
 	// NewReplicaSetDetailedMessage is a more detailed format message
-	NewReplicaSetDetailedMessage = "Created ReplicaSet %s (revision %d) with size %d"
+	NewReplicaSetDetailedMessage = "Created ReplicaSet %s (revision %d)"
 
 	// FoundNewRSReason is added in a rollout when it adopts an existing replica set.
 	FoundNewRSReason = "FoundNewReplicaSet"
@@ -85,6 +85,12 @@ const (
 	// RolloutPausedMessage is added in a rollout when it is paused. Lack of progress shouldn't be
 	// estimated once a rollout is paused.
 	RolloutPausedMessage = "Rollout is paused"
+
+	// ReplicaSetNotAvailableReason is added when the replicaset of an rollout is not available.
+	// This could happen when a fully promoted rollout becomes incomplete, e.g.,
+	// due to  pod restarts, evicted -> recreated. In this case, we'll need to reset the rollout's
+	// condition to `PROGRESSING` to avoid any timeouts.
+	ReplicaSetNotAvailableReason = "ReplicaSetNotAvailable"
 
 	// RolloutResumedReason is added in a rollout when it is resumed. Useful for not failing accidentally
 	// rollout that paused amidst a rollout and are bounded by a deadline.
@@ -131,14 +137,25 @@ const (
 	// ReplicaSetCompletedMessage is added when the rollout is completed
 	ReplicaSetCompletedMessage = "ReplicaSet %q has successfully progressed."
 
-	// ServiceNotFoundReason is added in a rollout when the service defined in the spec is not found
-	ServiceNotFoundReason = "ServiceNotFound"
-	// ServiceNotFoundMessage is added in a rollout when the service defined in the spec is not found
-	ServiceNotFoundMessage = "Service %q is not found"
 	// ServiceReferenceReason is added to a Rollout when there is an error with a Service reference
 	ServiceReferenceReason = "ServiceReferenceError"
 	// ServiceReferencingManagedService is added in a rollout when the multiple rollouts reference a Rollout
 	ServiceReferencingManagedService = "Service %q is managed by another Rollout"
+
+	// TargetGroupHealthyReason is emitted when target group has been verified
+	TargetGroupVerifiedReason              = "TargetGroupVerified"
+	TargetGroupVerifiedRegistrationMessage = "Service %s (TargetGroup %s) verified: %d endpoints registered"
+	TargetGroupVerifiedWeightsMessage      = "Service %s (TargetGroup %s) verified: canary weight %d set"
+	// TargetGroupHealthyReason is emitted when target group has not been verified
+	TargetGroupUnverifiedReason              = "TargetGroupUnverified"
+	TargetGroupUnverifiedRegistrationMessage = "Service %s (TargetGroup %s) not verified: %d/%d endpoints registered"
+	TargetGroupUnverifiedWeightsMessage      = "Service %s (TargetGroup %s) not verified: canary weight %d not yet set (current: %d)"
+	// TargetGroupVerifyErrorReason is emitted when we fail to verify the health of a target group due to error
+	TargetGroupVerifyErrorReason  = "TargetGroupVerifyError"
+	TargetGroupVerifyErrorMessage = "Failed to verify Service %s (TargetGroup %s): %s"
+	// WeightVerifyErrorReason is emitted when there is an error verifying the set weight
+	WeightVerifyErrorReason  = "WeightVerifyError"
+	WeightVerifyErrorMessage = "Failed to verify weight: %s"
 )
 
 // NewRolloutCondition creates a new rollout condition.
@@ -146,8 +163,8 @@ func NewRolloutCondition(condType v1alpha1.RolloutConditionType, status corev1.C
 	return &v1alpha1.RolloutCondition{
 		Type:               condType,
 		Status:             status,
-		LastUpdateTime:     metav1.Now(),
-		LastTransitionTime: metav1.Now(),
+		LastUpdateTime:     timeutil.MetaNow(),
+		LastTransitionTime: timeutil.MetaNow(),
 		Reason:             reason,
 		Message:            message,
 	}
@@ -165,8 +182,8 @@ func GetRolloutCondition(status v1alpha1.RolloutStatus, condType v1alpha1.Rollou
 }
 
 // SetRolloutCondition updates the rollout to include the provided condition. If the condition that
-// we are about to add already exists and has the same status and reason then we are not going to update.
-// Returns true if the condition was updated
+// we are about to add already exists and has the same status and reason, then we are not going to update
+// by returning false. Returns true if the condition was updated
 func SetRolloutCondition(status *v1alpha1.RolloutStatus, condition v1alpha1.RolloutCondition) bool {
 	currentCond := GetRolloutCondition(*status, condition.Type)
 	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason {
@@ -305,7 +322,7 @@ func RolloutTimedOut(rollout *v1alpha1.Rollout, newStatus *v1alpha1.RolloutStatu
 	// progress or tried to create a replica set, or resumed a paused rollout and
 	// compare against progressDeadlineSeconds.
 	from := condition.LastUpdateTime
-	now := time.Now()
+	now := timeutil.Now()
 
 	progressDeadlineSeconds := defaults.GetProgressDeadlineSecondsOrDefault(rollout)
 	delta := time.Duration(progressDeadlineSeconds) * time.Second

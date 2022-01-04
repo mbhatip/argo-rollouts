@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -78,6 +79,33 @@ func (s *ExperimentSuite) TestRolloutWithExperimentAndAnalysis() {
 		When().
 		PromoteRollout().
 		WaitForRolloutStatus("Healthy")
+}
+
+func (s *ExperimentSuite) TestExperimentWithServiceAndScaleDownDelay() {
+	g := s.Given()
+	g.ApplyManifests("@functional/experiment-with-service.yaml")
+	g.When().
+		WaitForExperimentPhase("experiment-with-service", "Running").
+		Sleep(time.Second*5).
+		Then().
+		ExpectExperimentTemplateReplicaSetNumReplicas("experiment-with-service", "test", 1).
+		ExpectExperimentServiceCount("experiment-with-service", 1).
+		When().
+		WaitForExperimentPhase("experiment-with-service", "Successful").
+		Sleep(time.Second*15).
+		Then().
+		ExpectExperimentTemplateReplicaSetNumReplicas("experiment-with-service", "test", 0).
+		ExpectExperimentServiceCount("experiment-with-service", 0)
+}
+
+func (s *ExperimentSuite) TestExperimentWithDryRunMetrics() {
+	g := s.Given()
+	g.ApplyManifests("@functional/experiment-dry-run-analysis.yaml")
+	g.When().
+		WaitForExperimentPhase("experiment-with-dry-run", "Successful").
+		Sleep(time.Second*3).
+		Then().
+		ExpectExperimentDryRunSummary(1, 0, 1, "experiment-with-dry-run")
 }
 
 func TestExperimentSuite(t *testing.T) {

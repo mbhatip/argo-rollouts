@@ -14,21 +14,19 @@ import (
 	log "github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
 	coreinformers "k8s.io/client-go/informers/core/v1"
-	extensionsinformers "k8s.io/client-go/informers/extensions/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	v1 "k8s.io/client-go/listers/core/v1"
-	extensionslisters "k8s.io/client-go/listers/extensions/v1beta1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubectl/pkg/util/slice"
@@ -42,6 +40,7 @@ import (
 	clientset "github.com/argoproj/argo-rollouts/pkg/client/clientset/versioned"
 	informers "github.com/argoproj/argo-rollouts/pkg/client/informers/externalversions/rollouts/v1alpha1"
 	listers "github.com/argoproj/argo-rollouts/pkg/client/listers/rollouts/v1alpha1"
+	"github.com/argoproj/argo-rollouts/rollout/trafficrouting"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/ambassador"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/istio"
 	analysisutil "github.com/argoproj/argo-rollouts/utils/analysis"
@@ -49,11 +48,13 @@ import (
 	controllerutil "github.com/argoproj/argo-rollouts/utils/controller"
 	"github.com/argoproj/argo-rollouts/utils/defaults"
 	experimentutil "github.com/argoproj/argo-rollouts/utils/experiment"
+	ingressutil "github.com/argoproj/argo-rollouts/utils/ingress"
 	istioutil "github.com/argoproj/argo-rollouts/utils/istio"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
 	"github.com/argoproj/argo-rollouts/utils/record"
 	replicasetutil "github.com/argoproj/argo-rollouts/utils/replicaset"
 	serviceutil "github.com/argoproj/argo-rollouts/utils/service"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 	unstructuredutil "github.com/argoproj/argo-rollouts/utils/unstructured"
 )
 
@@ -97,7 +98,7 @@ type ControllerConfig struct {
 	ClusterAnalysisTemplateInformer informers.ClusterAnalysisTemplateInformer
 	ReplicaSetInformer              appsinformers.ReplicaSetInformer
 	ServicesInformer                coreinformers.ServiceInformer
-	IngressInformer                 extensionsinformers.IngressInformer
+	IngressWrapper                  IngressWrapper
 	RolloutsInformer                informers.RolloutInformer
 	IstioPrimaryDynamicClient       dynamic.Interface
 	IstioVirtualServiceInformer     cache.SharedIndexInformer
@@ -132,7 +133,7 @@ type reconcilerBase struct {
 	rolloutsSynced                cache.InformerSynced
 	rolloutsIndexer               cache.Indexer
 	servicesLister                v1.ServiceLister
-	ingressesLister               extensionslisters.IngressLister
+	ingressWrapper                IngressWrapper
 	experimentsLister             listers.ExperimentLister
 	analysisRunLister             listers.AnalysisRunLister
 	analysisTemplateLister        listers.AnalysisTemplateLister
@@ -142,13 +143,20 @@ type reconcilerBase struct {
 	podRestarter RolloutPodRestarter
 
 	// used for unit testing
-	enqueueRollout              func(obj interface{})                                         //nolint:structcheck
-	enqueueRolloutAfter         func(obj interface{}, duration time.Duration)                 //nolint:structcheck
-	newTrafficRoutingReconciler func(roCtx *rolloutContext) (TrafficRoutingReconciler, error) //nolint:structcheck
+	enqueueRollout              func(obj interface{})                                                          //nolint:structcheck
+	enqueueRolloutAfter         func(obj interface{}, duration time.Duration)                                  //nolint:structcheck
+	newTrafficRoutingReconciler func(roCtx *rolloutContext) ([]trafficrouting.TrafficRoutingReconciler, error) //nolint:structcheck
 
 	// recorder is an event recorder for recording Event resources to the Kubernetes API.
 	recorder     record.EventRecorder
 	resyncPeriod time.Duration
+}
+
+type IngressWrapper interface {
+	GetCached(namespace, name string) (*ingressutil.Ingress, error)
+	Get(ctx context.Context, namespace, name string, opts metav1.GetOptions) (*ingressutil.Ingress, error)
+	Patch(ctx context.Context, namespace, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (*ingressutil.Ingress, error)
+	Create(ctx context.Context, namespace string, ingress *ingressutil.Ingress, opts metav1.CreateOptions) (*ingressutil.Ingress, error)
 }
 
 // NewController returns a new rollout controller
@@ -180,7 +188,7 @@ func NewController(cfg ControllerConfig) *Controller {
 		rolloutsLister:                cfg.RolloutsInformer.Lister(),
 		rolloutsSynced:                cfg.RolloutsInformer.Informer().HasSynced,
 		servicesLister:                cfg.ServicesInformer.Lister(),
-		ingressesLister:               cfg.IngressInformer.Lister(),
+		ingressWrapper:                cfg.IngressWrapper,
 		experimentsLister:             cfg.ExperimentInformer.Lister(),
 		analysisRunLister:             cfg.AnalysisRunInformer.Lister(),
 		analysisTemplateLister:        cfg.AnalysisTemplateInformer.Lister(),
@@ -215,7 +223,6 @@ func NewController(cfg ControllerConfig) *Controller {
 		VirtualServiceInformer:  cfg.IstioVirtualServiceInformer,
 		DestinationRuleInformer: cfg.IstioDestinationRuleInformer,
 	})
-
 	controller.newTrafficRoutingReconciler = controller.NewTrafficRoutingReconciler
 
 	log.Info("Setting up event handlers")
@@ -340,7 +347,7 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 // with the current status of the resource.
 func (c *Controller) syncHandler(key string) error {
 	ctx := context.TODO()
-	startTime := time.Now()
+	startTime := timeutil.Now()
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
@@ -388,7 +395,10 @@ func (c *Controller) syncHandler(key string) error {
 	if rollout.Spec.Replicas == nil {
 		logCtx.Info("Defaulting .spec.replica to 1")
 		r.Spec.Replicas = pointer.Int32Ptr(defaults.DefaultReplicas)
-		_, err := c.argoprojclientset.ArgoprojV1alpha1().Rollouts(r.Namespace).Update(ctx, r, metav1.UpdateOptions{})
+		newRollout, err := c.argoprojclientset.ArgoprojV1alpha1().Rollouts(r.Namespace).Update(ctx, r, metav1.UpdateOptions{})
+		if err == nil {
+			c.writeBackToInformer(newRollout)
+		}
 		return err
 	}
 
@@ -460,6 +470,7 @@ func (c *Controller) newRolloutContext(rollout *v1alpha1.Rollout) (*rolloutConte
 		otherExs:   otherExs,
 		newStatus: v1alpha1.RolloutStatus{
 			RestartedAt: rollout.Status.RestartedAt,
+			ALB:         rollout.Status.ALB,
 		},
 		pauseContext: &pauseContext{
 			rollout: rollout,
@@ -467,6 +478,8 @@ func (c *Controller) newRolloutContext(rollout *v1alpha1.Rollout) (*rolloutConte
 		},
 		reconcilerBase: c.reconcilerBase,
 	}
+	// carry over existing recorded weights
+	roCtx.newStatus.Canary.Weights = rollout.Status.Canary.Weights
 	return &roCtx, nil
 }
 
@@ -530,6 +543,12 @@ func (c *rolloutContext) getRolloutReferencedResources() (*validation.Referenced
 		return nil, err
 	}
 	refResources.Ingresses = *ingresses
+
+	// Validate Rollout virtualServices before referencing
+	err = validation.ValidateRolloutVirtualServicesConfig(c.rollout)
+	if err != nil {
+		return nil, err
+	}
 
 	virtualServices, err := c.IstioController.GetReferencedVirtualServices(c.rollout)
 	if err != nil {
@@ -752,13 +771,13 @@ func (c *rolloutContext) getReferencedAnalysisTemplates(rollout *v1alpha1.Rollou
 	}, nil
 }
 
-func (c *rolloutContext) getReferencedIngresses() (*[]v1beta1.Ingress, error) {
-	ingresses := []v1beta1.Ingress{}
+func (c *rolloutContext) getReferencedIngresses() (*[]ingressutil.Ingress, error) {
+	ingresses := []ingressutil.Ingress{}
 	canary := c.rollout.Spec.Strategy.Canary
 	fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting")
 	if canary != nil && canary.TrafficRouting != nil {
 		if canary.TrafficRouting.ALB != nil {
-			ingress, err := c.ingressesLister.Ingresses(c.rollout.Namespace).Get(canary.TrafficRouting.ALB.Ingress)
+			ingress, err := c.ingressWrapper.GetCached(c.rollout.Namespace, canary.TrafficRouting.ALB.Ingress)
 			if k8serrors.IsNotFound(err) {
 				return nil, field.Invalid(fldPath.Child("alb", "ingress"), canary.TrafficRouting.ALB.Ingress, err.Error())
 			}
@@ -767,7 +786,7 @@ func (c *rolloutContext) getReferencedIngresses() (*[]v1beta1.Ingress, error) {
 			}
 			ingresses = append(ingresses, *ingress)
 		} else if canary.TrafficRouting.Nginx != nil {
-			ingress, err := c.ingressesLister.Ingresses(c.rollout.Namespace).Get(canary.TrafficRouting.Nginx.StableIngress)
+			ingress, err := c.ingressWrapper.GetCached(c.rollout.Namespace, canary.TrafficRouting.Nginx.StableIngress)
 			if k8serrors.IsNotFound(err) {
 				return nil, field.Invalid(fldPath.Child("nginx", "stableIngress"), canary.TrafficRouting.Nginx.StableIngress, err.Error())
 			}

@@ -17,6 +17,10 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag }}
 
+      - name: Get SHA
+        id: get-sha
+        run: echo "::set-output name=sha::$(git log -1 --format='%H')"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v1
 
@@ -27,9 +31,7 @@ jobs:
         uses: actions/cache@v2
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+          key: ${{ runner.os }}-buildx-${{ steps.get-sha.outputs.sha }}
 
       - name: Print Disk Usage
         run: |
@@ -42,9 +44,11 @@ jobs:
         with:
           images: |
             quay.io/argoproj/argo-rollouts
-            ghcr.io/argoproj/argo-rollouts
+          # ghcr.io/argoproj/argo-rollouts
           tags: |
             type=semver,pattern={{version}},prefix=v,value=${{ github.event.inputs.tag }}
+          flavor: |
+            latest=false
 
       - name: Docker meta (plugin)
         id: plugin-meta
@@ -52,17 +56,19 @@ jobs:
         with:
           images: |
             quay.io/argoproj/kubectl-argo-rollouts
-            ghcr.io/argoproj/kubectl-argo-rollouts
+          #  ghcr.io/argoproj/kubectl-argo-rollouts
           tags: |
             type=semver,pattern={{version}},prefix=v,value=${{ github.event.inputs.tag }}
+          flavor: |
+            latest=false
 
-      - name: Login to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v1 
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # - name: Login to GitHub Container Registry
+      #   if: github.event_name != 'pull_request'
+      #   uses: docker/login-action@v1
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.repository_owner }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Quay.io
         if: github.event_name != 'pull_request'
@@ -75,6 +81,7 @@ jobs:
       - name: Build and push (controller-image)
         uses: docker/build-push-action@v2
         with:
+          context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.controller-meta.outputs.tags }}
@@ -84,6 +91,7 @@ jobs:
       - name: Build and push (plugin-image)
         uses: docker/build-push-action@v2
         with:
+          context: .
           target: kubectl-argo-rollouts
           platforms: linux/amd64,linux/arm64
           push: true
@@ -121,7 +129,11 @@ jobs:
           files: |
             dist/kubectl-argo-rollouts-linux-amd64
             dist/kubectl-argo-rollouts-darwin-amd64
+            dist/kubectl-argo-rollouts-windows-amd64
+            manifests/dashboard-install.yaml
             manifests/install.yaml
             manifests/namespace-install.yaml
+            manifests/notifications-install.yaml
+            docs/features/kustomize/rollout_cr_schema.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -178,6 +178,7 @@ provider to achieve more advanced traffic shaping.
 * [ALB Guide](getting-started/alb/index.md)
 * [Ambassador Guide](getting-started/ambassador/index.md)
 * [Istio Guide](getting-started/istio/index.md)
+* [Multiple Providers Guide](getting-started/mixed/index.md)
 * [NGINX Guide](getting-started/nginx/index.md)
 * [OpenShift Guide](getting-started/openshift/index.md)
 * [SMI Guide](getting-started/smi/index.md)

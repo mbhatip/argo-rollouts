@@ -1,3 +1,7 @@
+extra_css:
+- assets/versions.css
+extra_javascript:
+- assets/versions.js
 markdown_extensions:
 - codehilite
 - admonition
@@ -28,6 +32,7 @@ nav:
   - HPA: features/hpa-support.md
   - Ephemeral Metadata: features/ephemeral-metadata.md
   - Restarting Rollouts: features/restart.md
+  - Scaledown Aborted Rollouts: features/scaledown-aborted-rs.md
   - Anti Affinity: features/anti-affinity/anti-affinity.md
   - Helm: features/helm.md
   - Kustomize: features/kustomize.md
@@ -49,16 +54,20 @@ nav:
   - Job: analysis/job.md
   - Web: analysis/web.md
   - Kayenta: analysis/kayenta.md
+  - CloudWatch: analysis/cloudwatch.md
 - Experiments: features/experiment.md
 - Notifications:
   - Overview: features/notifications.md
   - Services:
+    - generated/notification-services/alertmanager.md
     - generated/notification-services/email.md
     - generated/notification-services/github.md
+    - generated/notification-services/googlechat.md
     - generated/notification-services/grafana.md
     - generated/notification-services/mattermost.md
     - generated/notification-services/opsgenie.md
     - generated/notification-services/overview.md
+    - generated/notification-services/pushover.md
     - generated/notification-services/rocketchat.md
     - generated/notification-services/slack.md
     - generated/notification-services/teams.md
@@ -69,6 +78,7 @@ nav:
   - Commands:
     - generated/kubectl-argo-rollouts/kubectl-argo-rollouts.md
     - generated/kubectl-argo-rollouts/kubectl-argo-rollouts_abort.md
+    - generated/kubectl-argo-rollouts/kubectl-argo-rollouts_completion.md
     - generated/kubectl-argo-rollouts/kubectl-argo-rollouts_create.md
     - generated/kubectl-argo-rollouts/kubectl-argo-rollouts_create_analysisrun.md
     - generated/kubectl-argo-rollouts/kubectl-argo-rollouts_dashboard.md

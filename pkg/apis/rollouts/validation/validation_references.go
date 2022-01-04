@@ -3,17 +3,16 @@ package validation
 import (
 	"fmt"
 
-	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	analysisutil "github.com/argoproj/argo-rollouts/utils/analysis"
 	"github.com/argoproj/argo-rollouts/utils/conditions"
+	istioutil "github.com/argoproj/argo-rollouts/utils/istio"
 	serviceutil "github.com/argoproj/argo-rollouts/utils/service"
+	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	ingressutil "github.com/argoproj/argo-rollouts/utils/ingress"
 	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
@@ -59,7 +58,7 @@ type ServiceWithType struct {
 
 type ReferencedResources struct {
 	AnalysisTemplatesWithType []AnalysisTemplatesWithType
-	Ingresses                 []v1beta1.Ingress
+	Ingresses                 []ingressutil.Ingress
 	ServiceWithType           []ServiceWithType
 	VirtualServices           []unstructured.Unstructured
 	AmbassadorMappings        []unstructured.Unstructured
@@ -75,7 +74,7 @@ func ValidateRolloutReferencedResources(rollout *v1alpha1.Rollout, referencedRes
 		allErrs = append(allErrs, ValidateAnalysisTemplatesWithType(rollout, templates)...)
 	}
 	for _, ingress := range referencedResources.Ingresses {
-		allErrs = append(allErrs, ValidateIngress(rollout, ingress)...)
+		allErrs = append(allErrs, ValidateIngress(rollout, &ingress)...)
 	}
 	for _, vsvc := range referencedResources.VirtualServices {
 		allErrs = append(allErrs, ValidateVirtualService(rollout, vsvc)...)
@@ -97,6 +96,19 @@ func ValidateService(svc ServiceWithType, rollout *v1alpha1.Rollout) field.Error
 	}
 
 	service := svc.Service
+
+	// Verify the service selector labels matches rollout's, except for DefaultRolloutUniqueLabelKey
+	for svcLabelKey, svcLabelValue := range service.Spec.Selector {
+		if svcLabelKey == v1alpha1.DefaultRolloutUniqueLabelKey {
+			continue
+		}
+		if v, ok := rollout.Spec.Template.Labels[svcLabelKey]; !ok || v != svcLabelValue {
+			msg := fmt.Sprintf("Service %q has unmatch lable %q in rollout", service.Name, svcLabelKey)
+			fmt.Println(msg)
+			allErrs = append(allErrs, field.Invalid(fldPath, service.Name, msg))
+		}
+	}
+
 	rolloutManagingService, exists := serviceutil.HasManagedByAnnotation(service)
 	if exists && rolloutManagingService != rollout.Name {
 		msg := fmt.Sprintf(conditions.ServiceReferencingManagedService, service.Name)
@@ -114,7 +126,7 @@ func ValidateAnalysisTemplatesWithType(rollout *v1alpha1.Rollout, templates Anal
 
 	templateNames := GetAnalysisTemplateNames(templates)
 	value := fmt.Sprintf("templateNames: %s", templateNames)
-	_, err := analysisutil.NewAnalysisRunFromTemplates(templates.AnalysisTemplates, templates.ClusterAnalysisTemplates, buildAnalysisArgs(templates.Args, rollout), "", "", "")
+	_, err := analysisutil.NewAnalysisRunFromTemplates(templates.AnalysisTemplates, templates.ClusterAnalysisTemplates, buildAnalysisArgs(templates.Args, rollout), []v1alpha1.DryRun{}, "", "", "")
 	if err != nil {
 		allErrs = append(allErrs, field.Invalid(fldPath, value, err.Error()))
 		return allErrs
@@ -191,7 +203,7 @@ func setArgValuePlaceHolder(Args []v1alpha1.Argument) {
 	}
 }
 
-func ValidateIngress(rollout *v1alpha1.Rollout, ingress v1beta1.Ingress) field.ErrorList {
+func ValidateIngress(rollout *v1alpha1.Rollout, ingress *ingressutil.Ingress) field.ErrorList {
 	allErrs := field.ErrorList{}
 	fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting")
 	var ingressName string
@@ -211,33 +223,95 @@ func ValidateIngress(rollout *v1alpha1.Rollout, ingress v1beta1.Ingress) field.E
 	} else {
 		return allErrs
 	}
-	if !ingressutil.HasRuleWithService(&ingress, serviceName) {
-		msg := fmt.Sprintf("ingress `%s` has no rules using service %s backend", ingress.Name, serviceName)
+	if !ingressutil.HasRuleWithService(ingress, serviceName) {
+		msg := fmt.Sprintf("ingress `%s` has no rules using service %s backend", ingress.GetName(), serviceName)
 		allErrs = append(allErrs, field.Invalid(fldPath, ingressName, msg))
 	}
 	return allErrs
 }
 
+// ValidateRolloutVirtualServicesConfig checks either VirtualService or VirtualServices configured
+// It returns an error if both VirtualService and VirtualServices are configured.
+// Also, returns an error if both are not configured.
+func ValidateRolloutVirtualServicesConfig(r *v1alpha1.Rollout) error {
+	var fldPath *field.Path
+	fldPath = field.NewPath("spec", "strategy", "canary", "trafficRouting", "istio")
+	errorString := "either VirtualService or VirtualServices must be configured"
+
+	if r.Spec.Strategy.Canary != nil {
+		canary := r.Spec.Strategy.Canary
+		if canary.TrafficRouting != nil && canary.TrafficRouting.Istio != nil {
+			if istioutil.MultipleVirtualServiceConfigured(r) {
+				if r.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService != nil {
+					return field.InternalError(fldPath, fmt.Errorf(errorString))
+				}
+			} else {
+				if r.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService == nil {
+					return field.InternalError(fldPath, fmt.Errorf(errorString))
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func ValidateVirtualService(rollout *v1alpha1.Rollout, obj unstructured.Unstructured) field.ErrorList {
+	var fldPath *field.Path
+	var virtualServices []v1alpha1.IstioVirtualService
 	allErrs := field.ErrorList{}
 	newObj := obj.DeepCopy()
-	fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting", "istio", "virtualService", "name")
-	vsvcName := rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService.Name
-	httpRoutesI, err := istio.GetHttpRoutesI(newObj)
-	if err != nil {
-		msg := fmt.Sprintf("Unable to get HTTP routes for Istio VirtualService")
-		allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+
+	if istioutil.MultipleVirtualServiceConfigured(rollout) {
+		fldPath = field.NewPath("spec", "strategy", "canary", "trafficRouting", "istio", "virtualServices", "name")
+		virtualServices = rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualServices
+	} else {
+		fldPath = field.NewPath("spec", "strategy", "canary", "trafficRouting", "istio", "virtualService", "name")
+		virtualServices = []v1alpha1.IstioVirtualService{*rollout.Spec.Strategy.Canary.TrafficRouting.Istio.VirtualService}
 	}
-	httpRoutes, err := istio.GetHttpRoutes(newObj, httpRoutesI)
-	if err != nil {
-		msg := fmt.Sprintf("Unable to get HTTP routes for Istio VirtualService")
-		allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+
+	virtualServiceRecordName := obj.GetName()
+
+	for _, virtualService := range virtualServices {
+		name := virtualService.Name
+		_, vsvcName := istioutil.GetVirtualServiceNamespaceName(name)
+		if vsvcName == virtualServiceRecordName {
+			httpRoutesI, errHttp := istio.GetHttpRoutesI(newObj)
+			tlsRoutesI, errTls := istio.GetTlsRoutesI(newObj)
+			// None of the HTTP/TLS routes exist.
+			if errHttp != nil && errTls != nil {
+				msg := fmt.Sprintf("Unable to get HTTP and/or TLS routes for Istio VirtualService")
+				allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+			}
+			// Validate HTTP Routes
+			if errHttp == nil {
+				httpRoutes, err := istio.GetHttpRoutes(newObj, httpRoutesI)
+				if err != nil {
+					msg := fmt.Sprintf("Unable to get HTTP routes for Istio VirtualService")
+					allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+				}
+				err = istio.ValidateHTTPRoutes(rollout, virtualService.Routes, httpRoutes)
+				if err != nil {
+					msg := fmt.Sprintf("Istio VirtualService has invalid HTTP routes. Error: %s", err.Error())
+					allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+				}
+			}
+			// Validate TLS Routes
+			if errTls == nil {
+				tlsRoutes, err := istio.GetTlsRoutes(newObj, tlsRoutesI)
+				if err != nil {
+					msg := fmt.Sprintf("Unable to get TLS routes for Istio VirtualService")
+					allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+				}
+				err = istio.ValidateTlsRoutes(rollout, virtualService.TLSRoutes, tlsRoutes)
+				if err != nil {
+					msg := fmt.Sprintf("Istio VirtualService has invalid TLS routes. Error: %s", err.Error())
+					allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
+				}
+			}
+			break
+		}
 	}
-	err = istio.ValidateHTTPRoutes(rollout, httpRoutes)
-	if err != nil {
-		msg := fmt.Sprintf("Istio VirtualService has invalid HTTP routes. Error: %s", err.Error())
-		allErrs = append(allErrs, field.Invalid(fldPath, vsvcName, msg))
-	}
+	// Return all errors
 	return allErrs
 }
 

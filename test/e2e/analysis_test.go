@@ -4,10 +4,12 @@ package e2e
 
 import (
 	"fmt"
+	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	"github.com/tj/assert"
 
 	"github.com/argoproj/argo-rollouts/test/fixtures"
 )
@@ -25,10 +27,12 @@ func (s *AnalysisSuite) SetupSuite() {
 	// shared analysis templates for suite
 	s.ApplyManifests("@functional/analysistemplate-web-background.yaml")
 	s.ApplyManifests("@functional/analysistemplate-sleep-job.yaml")
+	s.ApplyManifests("@functional/analysistemplate-multiple-job.yaml")
+	s.ApplyManifests("@functional/analysistemplate-fail-multiple-job.yaml")
 }
 
 // convenience to generate a new service with a given name
-func newService(name string) string {
+func newService(name, label string) string {
 	return fmt.Sprintf(`
 kind: Service
 apiVersion: v1
@@ -40,7 +44,7 @@ spec:
     targetPort: 80
   selector:
     app: %s
-`, name, name)
+`, name, label)
 }
 
 func (s *AnalysisSuite) TestCanaryBackgroundAnalysis() {
@@ -82,6 +86,51 @@ func (s *AnalysisSuite) TestCanaryInlineAnalysis() {
 		WaitForRolloutStatus("Healthy").
 		Then().
 		ExpectAnalysisRunCount(3)
+}
+
+func (s *AnalysisSuite) TestCanaryInlineMultipleAnalysis() {
+	s.Given().
+		RolloutObjects("@functional/rollout-inline-multiple-analysis.yaml").
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectAnalysisRunCount(0).
+		When().
+		UpdateSpec().
+		WaitForRolloutStatus("Paused").
+		PromoteRollout().
+		Sleep(5 * time.Second).
+		Then().
+		ExpectAnalysisRunCount(1).
+		ExpectInlineAnalysisRunPhase("Running").
+		When().
+		WaitForInlineAnalysisRunPhase("Successful").
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectAnalysisRunCount(1)
+}
+
+func (s *AnalysisSuite) TestCanaryFailInlineMultipleAnalysis() {
+	s.Given().
+		RolloutObjects("@functional/rollout-degraded-inline-multiple-analysis.yaml").
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectAnalysisRunCount(0).
+		When().
+		UpdateSpec().
+		WaitForRolloutStatus("Paused").
+		PromoteRollout().
+		Sleep(1 * time.Second). // promoting too fast causes test to flake
+		Then().
+		ExpectRolloutStatus("Progressing").
+		When().
+		WaitForInlineAnalysisRunPhase("Failed").
+		WaitForRolloutStatus("Degraded").
+		Then().
+		ExpectRolloutStatus("Degraded")
 }
 
 // TestBlueGreenAnalysis tests blue-green with pre/post analysis and then fast-tracked rollback
@@ -126,8 +175,8 @@ spec:
             cpu: 5m
 `
 	s.Given().
-		RolloutObjects(newService("bluegreen-analysis-active")).
-		RolloutObjects(newService("bluegreen-analysis-preview")).
+		RolloutObjects(newService("bluegreen-analysis-active", "bluegreen-analysis")).
+		RolloutObjects(newService("bluegreen-analysis-preview", "bluegreen-analysis")).
 		RolloutObjects(original).
 		When().
 		ApplyManifests().
@@ -184,8 +233,8 @@ spec:
 // TestBlueGreenPrePromotionFail test rollout behavior when pre promotion analysis fails
 func (s *AnalysisSuite) TestBlueGreenPrePromotionFail() {
 	s.Given().
-		RolloutObjects(newService("pre-promotion-fail-active")).
-		RolloutObjects(newService("pre-promotion-fail-preview")).
+		RolloutObjects(newService("pre-promotion-fail-active", "pre-promotion-fail")).
+		RolloutObjects(newService("pre-promotion-fail-preview", "pre-promotion-fail")).
 		RolloutObjects(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -195,6 +244,7 @@ spec:
   replicas: 2
   strategy:
     blueGreen:
+      abortScaleDownDelaySeconds: 0
       activeService: pre-promotion-fail-active
       previewService: pre-promotion-fail-preview
       previewReplicaCount: 1
@@ -264,8 +314,8 @@ spec:
 
 func (s *AnalysisSuite) TestBlueGreenPostPromotionFail() {
 	s.Given().
-		RolloutObjects(newService("post-promotion-fail-active")).
-		RolloutObjects(newService("post-promotion-fail-preview")).
+		RolloutObjects(newService("post-promotion-fail-active", "post-promotion-fail")).
+		RolloutObjects(newService("post-promotion-fail-preview", "post-promotion-fail")).
 		RolloutObjects(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -337,8 +387,8 @@ spec:
 // verifies
 func (s *AnalysisSuite) TestBlueGreenAbortAndUpdate() {
 	s.Given().
-		RolloutObjects(newService("bluegreen-abort-and-update-active")).
-		RolloutObjects(newService("bluegreen-abort-and-update-preview")).
+		RolloutObjects(newService("bluegreen-abort-and-update-active", "bluegreen-abort-and-update")).
+		RolloutObjects(newService("bluegreen-abort-and-update-preview", "bluegreen-abort-and-update")).
 		RolloutObjects(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -400,18 +450,21 @@ spec:
         args: null
 `).
 		WaitForRolloutStatus("Paused").
+		Sleep(2*time.Second). // Give some time before validating the scaling down event
 		Then().
 		ExpectRevisionPodCount("1", 1).
-		ExpectRevisionPodCount("2", 0).
+		ExpectRevisionScaleDown("2", true).
 		ExpectRevisionPodCount("3", 1).
 		ExpectActiveRevision("1").
 		ExpectPreviewRevision("3").
 		When().
 		PromoteRollout().
 		WaitForRolloutStatus("Healthy").
+		Sleep(2*time.Second). // Give some time before validating the scaling down event
 		Then().
 		ExpectRevisionPodCount("1", 1).
-		ExpectRevisionPodCount("2", 0).
+		ExpectRevisionScaleDown("1", true).
+		ExpectRevisionScaleDown("2", true).
 		ExpectRevisionPodCount("3", 1).
 		ExpectActiveRevision("3").
 		ExpectPreviewRevision("3").
@@ -421,8 +474,8 @@ spec:
 // TestBlueGreenKitchenSink various features of blue-green strategy
 func (s *AnalysisSuite) TestBlueGreenKitchenSink() {
 	s.Given().
-		RolloutObjects(newService("bluegreen-kitchensink-active")).
-		RolloutObjects(newService("bluegreen-kitchensink-preview")).
+		RolloutObjects(newService("bluegreen-kitchensink-active", "bluegreen-kitchensink")).
+		RolloutObjects(newService("bluegreen-kitchensink-preview", "bluegreen-kitchensink")).
 		RolloutObjects(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -600,7 +653,7 @@ spec:
 }
 
 func (s *AnalysisSuite) TestAnalysisWithSecret() {
-	(s.Given().
+	s.Given().
 		RolloutObjects("@functional/rollout-secret.yaml").
 		When().
 		ApplyManifests().
@@ -611,11 +664,63 @@ func (s *AnalysisSuite) TestAnalysisWithSecret() {
 		UpdateSpec().
 		WaitForRolloutStatus("Paused").
 		Then().
-		ExpectAnalysisRunCount(1).
+		Assert(func(t *fixtures.Then) {
+			ar := t.GetRolloutAnalysisRuns().Items[0]
+			assert.Equal(s.T(), v1alpha1.AnalysisPhaseSuccessful, ar.Status.Phase)
+			metricResult := ar.Status.MetricResults[0]
+			assert.Equal(s.T(), int32(2), metricResult.Count)
+		}).
 		When().
 		WaitForInlineAnalysisRunPhase("Successful").
 		PromoteRollout().
 		WaitForRolloutStatus("Healthy").
 		Then().
-		ExpectStableRevision("2"))
+		ExpectStableRevision("2")
+}
+
+func (s *AnalysisSuite) TestAnalysisWithArgs() {
+	s.Given().
+		RolloutObjects("@functional/rollout-secret-withArgs.yaml").
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectAnalysisRunCount(0).
+		When().
+		UpdateSpec().
+		WaitForRolloutStatus("Paused").
+		Then().
+		Assert(func(t *fixtures.Then) {
+			ar := t.GetRolloutAnalysisRuns().Items[0]
+			assert.Equal(s.T(), v1alpha1.AnalysisPhaseSuccessful, ar.Status.Phase)
+			metricResult := ar.Status.MetricResults[0]
+			assert.Equal(s.T(), int32(3), metricResult.Count)
+		}).
+		When().
+		WaitForInlineAnalysisRunPhase("Successful").
+		PromoteRollout().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectStableRevision("2")
+}
+
+func (s *AnalysisSuite) TestBackgroundAnalysisWithArgs() {
+	s.Given().
+		RolloutObjects("@functional/rollout-bg-analysis-withArgs.yaml").
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		Then().
+		ExpectAnalysisRunCount(0).
+		When().
+		UpdateSpec().
+		WaitForRolloutStatus("Paused").
+		Sleep(3 * time.Second). // Give some time before validating that AnalysisRun got kicked off
+		Then().
+		ExpectAnalysisRunCount(1).
+		ExpectBackgroundAnalysisRunPhase("Running").
+		When().
+		PromoteRollout().
+		WaitForRolloutStatus("Healthy").
+		WaitForBackgroundAnalysisRunPhase("Successful")
 }

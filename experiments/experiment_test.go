@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/utils/pointer"
+
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -18,10 +20,10 @@ import (
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/pkg/client/clientset/versioned/fake"
-
 	informers "github.com/argoproj/argo-rollouts/pkg/client/informers/externalversions"
 	"github.com/argoproj/argo-rollouts/utils/conditions"
 	"github.com/argoproj/argo-rollouts/utils/record"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 )
 
 func newTestContext(ex *v1alpha1.Experiment, objects ...runtime.Object) *experimentContext {
@@ -44,17 +46,21 @@ func newTestContext(ex *v1alpha1.Experiment, objects ...runtime.Object) *experim
 	analysisRunLister := rolloutsI.Argoproj().V1alpha1().AnalysisRuns().Lister()
 	analysisTemplateLister := rolloutsI.Argoproj().V1alpha1().AnalysisTemplates().Lister()
 	clusterAnalysisTemplateLister := rolloutsI.Argoproj().V1alpha1().ClusterAnalysisTemplates().Lister()
+	serviceLister := k8sI.Core().V1().Services().Lister()
 
 	return newExperimentContext(
 		ex,
 		make(map[string]*appsv1.ReplicaSet),
+		make(map[string]*corev1.Service),
 		kubeclient,
 		rolloutclient,
 		rsLister,
 		analysisTemplateLister,
 		clusterAnalysisTemplateLister,
 		analysisRunLister,
+		serviceLister,
 		record.NewFakeEventRecorder(),
+		noResyncPeriodFunc(),
 		func(obj interface{}, duration time.Duration) {},
 	)
 }
@@ -83,24 +89,86 @@ func TestSetExperimentToPending(t *testing.T) {
 	assert.Equal(t, expectedPatch, patch)
 }
 
+// TestAddScaleDownDelayToRS verifies that we add a scale down delay to the ReplicaSet after experiment completes
+func TestAddScaleDownDelayToRS(t *testing.T) {
+	templates := generateTemplates("bar")
+	e := newExperiment("foo", templates, "")
+	e.Status.AvailableAt = now()
+	e.Status.Phase = v1alpha1.AnalysisPhaseRunning
+	cond := conditions.NewExperimentConditions(v1alpha1.ExperimentProgressing, corev1.ConditionTrue, conditions.NewRSAvailableReason, "Experiment \"foo\" is running.")
+	e.Status.Conditions = append(e.Status.Conditions, *cond)
+	rs := templateToRS(e, templates[0], 1)
+	e.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
+		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusSuccessful, now()),
+	}
+
+	f := newFixture(t, e, rs)
+	defer f.Close()
+
+	f.expectPatchExperimentAction(e)
+	patchRs1Index := f.expectPatchReplicaSetAction(rs) // Add scaleDownDelaySeconds
+	f.expectGetReplicaSetAction(rs)                    // Get RS after patch to modify updated version
+	f.run(getKey(e, t))
+
+	f.verifyPatchedReplicaSetAddScaleDownDelay(patchRs1Index, 30)
+}
+
+// TestAddScaleDownDelayToRS verifies that we add a scale down delay to the ReplicaSet after experiment completes
+func TestRemoveScaleDownDelayFromRS(t *testing.T) {
+	templates := generateTemplates("bar")
+	e := newExperiment("foo", templates, "")
+	e.Spec.ScaleDownDelaySeconds = pointer.Int32Ptr(0)
+	e.Status.AvailableAt = now()
+	e.Status.Phase = v1alpha1.AnalysisPhaseRunning
+	cond := conditions.NewExperimentConditions(v1alpha1.ExperimentProgressing, corev1.ConditionTrue, conditions.NewRSAvailableReason, "Experiment \"foo\" is running.")
+	e.Status.Conditions = append(e.Status.Conditions, *cond)
+	rs := templateToRS(e, templates[0], 1)
+	rs.ObjectMeta.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey] = timeutil.Now().Add(600 * time.Second).UTC().Format(time.RFC3339)
+	e.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
+		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusSuccessful, now()),
+	}
+
+	f := newFixture(t, e, rs)
+	defer f.Close()
+
+	f.expectPatchExperimentAction(e)
+	patchRs1Index := f.expectPatchReplicaSetAction(rs) // Remove scaleDownDelaySeconds
+	f.expectGetReplicaSetAction(rs)                    // Get RS after patch to modify updated version
+	f.expectUpdateReplicaSetAction(rs)
+	f.run(getKey(e, t))
+
+	f.verifyPatchedReplicaSetRemoveScaleDownDelayAnnotation(patchRs1Index)
+}
+
+// TestScaleDownRSAfterFinish verifies that ScaleDownDelaySeconds annotation is added to ReplicaSet that is to be scaled down
 func TestScaleDownRSAfterFinish(t *testing.T) {
 	templates := generateTemplates("bar", "baz")
+	templates[0].Service = &v1alpha1.TemplateService{}
+
 	e := newExperiment("foo", templates, "")
+	rs1 := templateToRS(e, templates[0], 1)
+	rs2 := templateToRS(e, templates[1], 1)
+	s1 := templateToService(e, templates[0], *rs1)
+
 	e.Status.AvailableAt = now()
 	e.Status.Phase = v1alpha1.AnalysisPhaseRunning
 	e.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
 		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusSuccessful, now()),
 		generateTemplatesStatus("baz", 1, 1, v1alpha1.TemplateStatusSuccessful, now()),
 	}
+	e.Status.TemplateStatuses[0].ServiceName = s1.Name
 	cond := conditions.NewExperimentConditions(v1alpha1.ExperimentProgressing, corev1.ConditionTrue, conditions.NewRSAvailableReason, "Experiment \"foo\" is running.")
 	e.Status.Conditions = append(e.Status.Conditions, *cond)
-	rs1 := templateToRS(e, templates[0], 1)
-	rs2 := templateToRS(e, templates[1], 1)
 
-	f := newFixture(t, e, rs1, rs2)
+	inThePast := timeutil.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339)
+	rs1.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey] = inThePast
+	rs2.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey] = inThePast
+
+	f := newFixture(t, e, rs1, rs2, s1)
 	defer f.Close()
 
 	updateRs1Index := f.expectUpdateReplicaSetAction(rs1)
+	f.expectDeleteServiceAction(s1)
 	updateRs2Index := f.expectUpdateReplicaSetAction(rs2)
 	expPatchIndex := f.expectPatchExperimentAction(e)
 
@@ -151,9 +219,9 @@ func TestNoPatch(t *testing.T) {
 		Type:               v1alpha1.ExperimentProgressing,
 		Reason:             conditions.NewRSAvailableReason,
 		Message:            fmt.Sprintf(conditions.ExperimentRunningMessage, e.Name),
-		LastTransitionTime: metav1.Now(),
+		LastTransitionTime: timeutil.MetaNow(),
 		Status:             corev1.ConditionTrue,
-		LastUpdateTime:     metav1.Now(),
+		LastUpdateTime:     timeutil.MetaNow(),
 	}}
 
 	e.Status.AvailableAt = now()
@@ -175,7 +243,7 @@ func TestSuccessAfterDurationPasses(t *testing.T) {
 	templates := generateTemplates("bar", "baz")
 	e := newExperiment("foo", templates, "5s")
 
-	tenSecondsAgo := metav1.Now().Add(-10 * time.Second)
+	tenSecondsAgo := timeutil.Now().Add(-10 * time.Second)
 	e.Status.AvailableAt = &metav1.Time{Time: tenSecondsAgo}
 	e.Status.Phase = v1alpha1.AnalysisPhaseRunning
 	e.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
@@ -210,7 +278,7 @@ func TestSuccessAfterDurationPasses(t *testing.T) {
 func TestDontRequeueWithoutDuration(t *testing.T) {
 	templates := generateTemplates("bar")
 	ex := newExperiment("foo", templates, "")
-	ex.Status.AvailableAt = &metav1.Time{Time: metav1.Now().Add(-10 * time.Second)}
+	ex.Status.AvailableAt = &metav1.Time{Time: timeutil.MetaNow().Add(-10 * time.Second)}
 	ex.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
 		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusRunning, now()),
 	}
@@ -235,7 +303,7 @@ func TestRequeueAfterDuration(t *testing.T) {
 	templates := generateTemplates("bar")
 	ex := newExperiment("foo", templates, "")
 	ex.Spec.Duration = "30s"
-	ex.Status.AvailableAt = &metav1.Time{Time: metav1.Now().Add(-10 * time.Second)}
+	ex.Status.AvailableAt = &metav1.Time{Time: timeutil.MetaNow().Add(-10 * time.Second)}
 	ex.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
 		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusRunning, now()),
 	}
@@ -250,7 +318,7 @@ func TestRequeueAfterDuration(t *testing.T) {
 		// ensures we are enqueued around ~20 seconds
 		twentySeconds := time.Second * time.Duration(20)
 		delta := math.Abs(float64(twentySeconds - duration))
-		assert.True(t, delta < float64(100*time.Millisecond), "")
+		assert.True(t, delta < float64(150*time.Millisecond), "")
 	}
 	exCtx.reconcile()
 	assert.True(t, enqueueCalled)
@@ -264,7 +332,7 @@ func TestRequeueAfterProgressDeadlineSeconds(t *testing.T) {
 	ex.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
 		generateTemplatesStatus("bar", 0, 0, v1alpha1.TemplateStatusProgressing, now()),
 	}
-	now := metav1.Now()
+	now := timeutil.MetaNow()
 	ex.Status.TemplateStatuses[0].LastTransitionTime = &now
 	exCtx := newTestContext(ex)
 	rs1 := templateToRS(ex, ex.Spec.Templates[0], 0)
@@ -277,7 +345,7 @@ func TestRequeueAfterProgressDeadlineSeconds(t *testing.T) {
 		// ensures we are enqueued around 10 minutes
 		tenMinutes := time.Second * time.Duration(600)
 		delta := math.Abs(float64(tenMinutes - duration))
-		assert.True(t, delta < float64(100*time.Millisecond))
+		assert.True(t, delta < float64(150*time.Millisecond))
 	}
 	exCtx.reconcile()
 	assert.True(t, enqueueCalled)
@@ -302,4 +370,102 @@ func TestFailReplicaSetCreation(t *testing.T) {
 	newStatus := exCtx.reconcile()
 	assert.Equal(t, newStatus.TemplateStatuses[1].Status, v1alpha1.TemplateStatusError)
 	assert.Equal(t, newStatus.Phase, v1alpha1.AnalysisPhaseError)
+}
+
+func TestFailServiceCreation(t *testing.T) {
+	templates := generateTemplates("bad")
+	templates[0].Service = &v1alpha1.TemplateService{}
+	e := newExperiment("foo", templates, "")
+
+	exCtx := newTestContext(e)
+	rs := templateToRS(e, templates[0], 0)
+	exCtx.templateRSs[templates[0].Name] = rs
+
+	fakeClient := exCtx.kubeclientset.(*k8sfake.Clientset)
+	fakeClient.PrependReactor("create", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, errors.New("intentional error")
+	})
+	newStatus := exCtx.reconcile()
+	assert.Equal(t, v1alpha1.TemplateStatusError, newStatus.TemplateStatuses[0].Status)
+	assert.Contains(t, newStatus.TemplateStatuses[0].Message, "Failed to create Service for template 'bad'")
+	assert.Equal(t, v1alpha1.AnalysisPhaseError, newStatus.Phase)
+}
+
+func TestFailAddScaleDownDelay(t *testing.T) {
+	templates := generateTemplates("bar")
+	templates[0].Service = &v1alpha1.TemplateService{}
+	ex := newExperiment("foo", templates, "")
+	ex.Spec.ScaleDownDelaySeconds = pointer.Int32Ptr(0)
+	ex.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
+		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusFailed, now()),
+	}
+	rs := templateToRS(ex, templates[0], 1)
+
+	exCtx := newTestContext(ex)
+	exCtx.templateRSs["bar"] = rs
+
+	fakeClient := exCtx.kubeclientset.(*k8sfake.Clientset)
+	fakeClient.PrependReactor("patch", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, errors.New("intentional error")
+	})
+	newStatus := exCtx.reconcile()
+	assert.Equal(t, v1alpha1.TemplateStatusError, newStatus.TemplateStatuses[0].Status)
+	assert.Contains(t, newStatus.TemplateStatuses[0].Message, "Unable to scale ReplicaSet for template 'bar' to desired replica count '0'")
+	assert.Equal(t, newStatus.Phase, v1alpha1.AnalysisPhaseError)
+}
+
+// TestDeleteOutdatedService verifies that outdated service for Template in templateServices map is deleted and new service is created
+func TestDeleteOutdatedService(t *testing.T) {
+	templates := generateTemplates("bar")
+	templates[0].Service = &v1alpha1.TemplateService{}
+	ex := newExperiment("foo", templates, "")
+
+	wrongService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "wrong-service"}}
+	ex.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
+		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusRunning, now()),
+	}
+	ex.Status.TemplateStatuses[0].ServiceName = wrongService.Name
+
+	rs := templateToRS(ex, templates[0], 0)
+	s := templateToService(ex, templates[0], *rs)
+
+	exCtx := newTestContext(ex)
+
+	exCtx.templateRSs = map[string]*appsv1.ReplicaSet{
+		"bar": rs,
+	}
+
+	exCtx.templateServices = map[string]*corev1.Service{
+		"bar": wrongService,
+	}
+
+	exStatus := exCtx.reconcile()
+	assert.Equal(t, s.Name, exStatus.TemplateStatuses[0].ServiceName)
+	assert.Equal(t, s.Name, exCtx.templateServices["bar"].Name)
+	assert.NotContains(t, exCtx.templateServices, wrongService.Name)
+}
+
+func TestDeleteServiceIfServiceFieldNil(t *testing.T) {
+	templates := generateTemplates("bar")
+	templates[0].Replicas = pointer.Int32Ptr(0)
+	ex := newExperiment("foo", templates, "")
+	ex.Status.TemplateStatuses = []v1alpha1.TemplateStatus{
+		generateTemplatesStatus("bar", 1, 1, v1alpha1.TemplateStatusRunning, now()),
+	}
+
+	svcToDelete := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "service-to-delete"}}
+	ex.Status.TemplateStatuses[0].ServiceName = svcToDelete.Name
+
+	exCtx := newTestContext(ex)
+
+	rs := templateToRS(ex, templates[0], 0)
+
+	exCtx.templateRSs["bar"] = rs
+
+	exCtx.templateServices["bar"] = svcToDelete
+
+	exStatus := exCtx.reconcile()
+
+	assert.Equal(t, "", exStatus.TemplateStatuses[0].ServiceName)
+	assert.Nil(t, exCtx.templateServices["bar"])
 }

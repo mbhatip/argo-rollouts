@@ -90,10 +90,12 @@ spec:
 		ExpectRevisionPodCount("2", 1).
 		ExpectRolloutEvents([]string{
 			"RolloutUpdated",       // Rollout updated to revision 1
-			"NewReplicaSetCreated", // Created ReplicaSet abort-retry-promote-698fbfb9dc (revision 1) with size 1
+			"NewReplicaSetCreated", // Created ReplicaSet abort-retry-promote-698fbfb9dc (revision 1)
+			"ScalingReplicaSet",    // Scaled up ReplicaSet abort-retry-promote-698fbfb9dc (revision 1) from 0 to 1
 			"RolloutCompleted",     // Rollout completed update to revision 1 (698fbfb9dc): Initial deploy
 			"RolloutUpdated",       // Rollout updated to revision 2
-			"NewReplicaSetCreated", // Created ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) with size 1
+			"NewReplicaSetCreated", // Created ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2)
+			"ScalingReplicaSet",    // Scaled up ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 0 to 1
 			"RolloutStepCompleted", // Rollout step 1/2 completed (setWeight: 50)
 			"RolloutPaused",        // Rollout is paused (CanaryPauseStep)
 			"ScalingReplicaSet",    // Scaled down ReplicaSet abort-retry-promote-75dcb5ddd6 (revision 2) from 1 to 0
@@ -184,7 +186,7 @@ spec:
 // TestBlueGreenPromoteFull verifies behavior when performing full promotion with a blue-green strategy
 func (s *FunctionalSuite) TestBlueGreenPromoteFull() {
 	s.Given().
-		RolloutObjects(newService("bluegreen-promote-full-active")).
+		RolloutObjects(newService("bluegreen-promote-full-active", "bluegreen-promote-full")).
 		RolloutObjects(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -696,71 +698,22 @@ func (s *FunctionalSuite) TestBlueGreenUpdate() {
 		ExpectReplicaCounts(3, 6, 3, 3, 3).
 		ExpectRolloutEvents([]string{
 			"RolloutUpdated",       // Rollout updated to revision 1
-			"NewReplicaSetCreated", // Created ReplicaSet bluegreen-7dcd8f8869 (revision 1) with size 3
+			"NewReplicaSetCreated", // Created ReplicaSet bluegreen-7dcd8f8869 (revision 1)
+			"ScalingReplicaSet",    // Scaled up ReplicaSet bluegreen-7dcd8f8869 (revision 1) from 0 to 3
 			"RolloutCompleted",     // Rollout completed update to revision 1 (7dcd8f8869): Initial deploy
 			"SwitchService",        // Switched selector for service 'bluegreen' from '' to '7dcd8f8869'
 			"RolloutUpdated",       // Rollout updated to revision 2
-			"NewReplicaSetCreated", // Created ReplicaSet bluegreen-5498785cd6 (revision 2) with size 3
+			"NewReplicaSetCreated", // Created ReplicaSet bluegreen-5498785cd6 (revision 2)
+			"ScalingReplicaSet",    // Scaled up ReplicaSet bluegreen-5498785cd6 (revision 2) from 0 to 3
 			"SwitchService",        // Switched selector for service 'bluegreen' from '7dcd8f8869' to '6c779b88b6'
 			"RolloutCompleted",     // Rollout completed update to revision 2 (6c779b88b6): Completed blue-green update
 		})
 }
 
-// TestBlueGreenPreviewReplicaCount verifies the previewReplicaCount feature
-func (s *FunctionalSuite) TestBlueGreenPreviewReplicaCount() {
-	s.Given().
-		RolloutObjects(newService("bluegreen-preview-replicas-active")).
-		RolloutObjects(newService("bluegreen-preview-replicas-preview")).
-		RolloutObjects(`
-apiVersion: argoproj.io/v1alpha1
-kind: Rollout
-metadata:
-  name: bluegreen-preview-replicas
-spec:
-  replicas: 2
-  strategy:
-    blueGreen:
-      activeService: bluegreen-preview-replicas-active
-      previewService: bluegreen-preview-replicas-preview
-      previewReplicaCount: 1
-      scaleDownDelaySeconds: 5
-      autoPromotionEnabled: false
-  selector:
-    matchLabels:
-      app: bluegreen-preview-replicas
-  template:
-    metadata:
-      labels:
-        app: bluegreen-preview-replicas
-    spec:
-      containers:
-      - name: bluegreen-preview-replicas
-        image: nginx:1.19-alpine
-        resources:
-          requests:
-            memory: 16Mi
-            cpu: 1m
-`).
-		When().
-		ApplyManifests().
-		WaitForRolloutStatus("Healthy").
-		UpdateSpec().
-		WaitForRolloutStatus("Paused").
-		Then().
-		ExpectRevisionPodCount("2", 1).
-		ExpectRevisionPodCount("1", 2).
-		ExpectReplicaCounts(2, 3, 1, 2, 2). // desired, current, updated, ready, available
-		When().
-		PromoteRollout().
-		WaitForRolloutStatus("Healthy").
-		Then().
-		ExpectReplicaCounts(2, 4, 2, 2, 2)
-}
-
 // TestBlueGreenToCanary tests behavior when migrating from bluegreen to canary
 func (s *FunctionalSuite) TestBlueGreenToCanary() {
 	s.Given().
-		RolloutObjects(newService("bluegreen-to-canary")).
+		RolloutObjects(newService("bluegreen-to-canary", "bluegreen-to-canary")).
 		HealthyRollout(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -867,7 +820,7 @@ spec:
 // TestBlueGreenScaleDownDelay verifies the scaleDownDelay feature
 func (s *FunctionalSuite) TestBlueGreenScaleDownDelay() {
 	s.Given().
-		RolloutObjects(newService("bluegreen-scaledowndelay-active")).
+		RolloutObjects(newService("bluegreen-scaledowndelay-active", "bluegreen-scaledowndelay")).
 		RolloutObjects(`
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
@@ -936,6 +889,129 @@ spec:
 		ExpectReplicaCounts(1, 2, 1, 1, 1)
 }
 
+// TestBlueGreenAbortExceedProgressDeadline verifies the AbortExceedProgressDeadline feature
+func (s *FunctionalSuite) TestBlueGreenExceedProgressDeadlineAbort() {
+	s.Given().
+		RolloutObjects(newService("bluegreen-scaledowndelay-active", "bluegreen-scaledowndelay")).
+		RolloutObjects(`
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: bluegreen-scaledowndelay
+spec:
+  replicas: 1
+  strategy:
+    blueGreen:
+      activeService: bluegreen-scaledowndelay-active
+      abortScaleDownDelaySeconds: 2
+  selector:
+    matchLabels:
+      app: bluegreen-scaledowndelay
+  template:
+    metadata:
+      labels:
+        app: bluegreen-scaledowndelay
+    spec:
+      containers:
+      - name: bluegreen-scaledowndelay
+        image: nginx:1.19-alpine
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 1m
+`).
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		PatchSpec(`
+spec:
+  progressDeadlineAbort: false
+  progressDeadlineSeconds: 1
+  template:
+    spec:
+      containers:
+      - name: bad2good
+        image: nginx:1.19-alpine-argo-error
+        command: null`).
+		WaitForRolloutStatus("Degraded").
+		Sleep(3*time.Second).
+		Then().
+		ExpectRevisionPodCount("2", 1).
+		ExpectRollout("Abort=False", func(r *v1alpha1.Rollout) bool {
+			return r.Status.Abort == false
+		}).
+		When().
+		PatchSpec(`
+spec:
+  progressDeadlineAbort: true
+  progressDeadlineSeconds: 1
+  template:
+    spec:
+      containers:
+      - name: bad2good
+        image: nginx:1.19-alpine-argo-error
+        command: null`).
+		WaitForRolloutStatus("Degraded").
+		Sleep(3*time.Second).
+		Then().
+		ExpectRevisionPodCount("2", 0).
+		ExpectRollout("Abort=True", func(r *v1alpha1.Rollout) bool {
+			return r.Status.Abort == true && len(r.Status.Conditions) == 3
+		})
+}
+
+// TestBlueGreenScaleDownOnAbort verifies the scaleDownOnAbort feature
+func (s *FunctionalSuite) TestBlueGreenScaleDownOnAbort() {
+	s.Given().
+		RolloutObjects(newService("bluegreen-preview-replicas-active", "bluegreen-preview-replicas")).
+		RolloutObjects(newService("bluegreen-preview-replicas-preview", "bluegreen-preview-replicas")).
+		RolloutObjects(`
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: bluegreen-scaledown-on-abort
+spec:
+  replicas: 2
+  strategy:
+    blueGreen:
+      abortScaleDownDelaySeconds: 1
+      activeService: bluegreen-preview-replicas-active
+      previewService: bluegreen-preview-replicas-preview
+      previewReplicaCount: 1
+      scaleDownDelaySeconds: 5
+      autoPromotionEnabled: false
+  selector:
+    matchLabels:
+      app: bluegreen-preview-replicas
+  template:
+    metadata:
+      labels:
+        app: bluegreen-preview-replicas
+    spec:
+      containers:
+      - name: bluegreen-preview-replicas
+        image: nginx:1.19-alpine
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 1m
+`).
+		When().
+		ApplyManifests().
+		WaitForRolloutStatus("Healthy").
+		UpdateSpec().
+		WaitForRolloutStatus("Paused").
+		Then().
+		ExpectRevisionPodCount("2", 1).
+		ExpectRevisionPodCount("1", 2).
+		When().
+		AbortRollout().
+		WaitForRolloutStatus("Degraded").
+		Sleep(3*time.Second).
+		Then().
+		ExpectRevisionPodCount("2", 0)
+}
+
 func (s *FunctionalSuite) TestKubectlWaitForPaused() {
 	s.Given().
 		HealthyRollout(`
@@ -996,6 +1072,43 @@ spec:
 		}).
 		ExpectRolloutStatus("Healthy").
 		ExpectActiveRevision("2")
+}
+
+func (s *FunctionalSuite) TestCompleteRolloutRestart() {
+	s.Given().
+		HealthyRollout(`
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: rollout-restart
+spec:
+  progressDeadlineAbort: true
+  progressDeadlineSeconds: 15
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ollout-restart
+  template:
+    metadata:
+      labels:
+        app: ollout-restart
+    spec:
+      containers:
+      - name: ollout-restart
+        image: nginx:1.19-alpine
+        imagePullPolicy: Always
+  strategy:
+    canary:
+      steps:
+      - setWeight: 20
+`).
+		When().
+		WatchRolloutStatus("Healthy").
+		Sleep(16 * time.Second). // give it enough time to pass the progressDeadlineSeconds
+		Then().
+		When().
+		RestartRollout().
+		WatchRolloutStatus("Healthy")
 }
 
 func (s *FunctionalSuite) TestKubectlWaitForCompleted() {
@@ -1251,7 +1364,7 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: rollout-bluegreen
+      app: rollout-ref-deployment
   progressDeadlineSeconds: 5
   revisionHistoryLimit: 2
   strategy:
@@ -1260,7 +1373,7 @@ spec:
   template:
     metadata:
       labels:
-        app: rollout-bluegreen
+        app: rollout-ref-deployment
     spec:
       containers:
         - name: rollouts-demo

@@ -21,7 +21,7 @@ DEV_IMAGE=false
 # E2E variables
 E2E_INSTANCE_ID ?= argo-rollouts-e2e
 E2E_TEST_OPTIONS ?= 
-E2E_PARALLEL ?= 1
+E2E_PARALLEL ?= 4
 
 override LDFLAGS += \
   -X ${PACKAGE}/utils/version.version=${VERSION} \
@@ -197,6 +197,11 @@ plugin-darwin: ui/dist
 	cp -r ui/dist/app/* server/static
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -v -i -ldflags '${LDFLAGS}' -o ${DIST_DIR}/${PLUGIN_CLI_NAME}-darwin-amd64 ./cmd/kubectl-argo-rollouts
 
+.PHONY: plugin-windows
+plugin-windows: ui/dist
+	cp -r ui/dist/app/* server/static
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -v -i -ldflags '${LDFLAGS}' -o ${DIST_DIR}/${PLUGIN_CLI_NAME}-windows-amd64 ./cmd/kubectl-argo-rollouts
+
 .PHONY: docs
 docs:
 	go run ./hack/gen-docs/main.go
@@ -210,7 +215,7 @@ builder-image:
 image:
 ifeq ($(DEV_IMAGE), true)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -v -i -ldflags '${LDFLAGS}' -o ${DIST_DIR}/rollouts-controller-linux-amd64 ./cmd/rollouts-controller
-	docker build -t $(IMAGE_PREFIX)argo-rollouts:$(IMAGE_TAG) -f Dockerfile.dev .
+	docker build -t $(IMAGE_PREFIX)argo-rollouts:$(IMAGE_TAG) -f Dockerfile.dev ${DIST_DIR}
 else
 	docker build -t $(IMAGE_PREFIX)argo-rollouts:$(IMAGE_TAG)  .
 endif
@@ -235,11 +240,11 @@ test-kustomize:
 
 .PHONY: start-e2e
 start-e2e:
-	go run ./cmd/rollouts-controller/main.go --instance-id ${E2E_INSTANCE_ID} --loglevel debug
+	go run ./cmd/rollouts-controller/main.go --instance-id ${E2E_INSTANCE_ID} --loglevel debug --kloglevel 6
 
 .PHONY: test-e2e
 test-e2e:
-	go test -timeout 20m -v -count 1 --tags e2e -p ${E2E_PARALLEL} --short ./test/e2e ${E2E_TEST_OPTIONS}
+	go test -timeout 30m -v -count 1 --tags e2e -p ${E2E_PARALLEL} --short ./test/e2e ${E2E_TEST_OPTIONS}
 
 .PHONY: coverage
 coverage: test

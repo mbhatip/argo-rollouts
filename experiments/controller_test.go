@@ -8,11 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/undefinedlabs/go-mpatch"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
+
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"github.com/stretchr/testify/assert"
 
 	"github.com/argoproj/argo-rollouts/utils/queue"
 
-	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -50,12 +53,12 @@ const (
 )
 
 func now() *metav1.Time {
-	now := metav1.Time{Time: time.Now().Truncate(time.Second)}
+	now := metav1.Time{Time: timeutil.Now().Truncate(time.Second)}
 	return &now
 }
 
 func secondsAgo(seconds int) *metav1.Time {
-	ago := metav1.Time{Time: time.Now().Add(-1 * time.Second * time.Duration(seconds)).Truncate(time.Second)}
+	ago := metav1.Time{Time: timeutil.Now().Add(-1 * time.Second * time.Duration(seconds)).Truncate(time.Second)}
 	return &ago
 }
 
@@ -70,6 +73,7 @@ type fixture struct {
 	analysisRunLister             []*v1alpha1.AnalysisRun
 	analysisTemplateLister        []*v1alpha1.AnalysisTemplate
 	clusterAnalysisTemplateLister []*v1alpha1.ClusterAnalysisTemplate
+	serviceLister                 []*corev1.Service
 	// Actions expected to happen on the client.
 	kubeactions []core.Action
 	actions     []core.Action
@@ -102,17 +106,22 @@ func newFixture(t *testing.T, objects ...runtime.Object) *fixture {
 		case *appsv1.ReplicaSet:
 			f.kubeobjects = append(f.kubeobjects, obj)
 			f.replicaSetLister = append(f.replicaSetLister, obj.(*appsv1.ReplicaSet))
+		case *corev1.Service:
+			f.kubeobjects = append(f.kubeobjects, obj)
+			f.serviceLister = append(f.serviceLister, obj.(*corev1.Service))
 		}
 	}
 	f.client = fake.NewSimpleClientset(f.objects...)
 	f.kubeclient = k8sfake.NewSimpleClientset(f.kubeobjects...)
 	f.enqueuedObjects = make(map[string]int)
 	now := time.Now()
-	patch, err := mpatch.PatchMethod(time.Now, func() time.Time {
+	timeutil.Now = func() time.Time {
 		return now
-	})
-	assert.NoError(t, err)
-	f.unfreezeTime = patch.Unpatch
+	}
+	f.unfreezeTime = func() error {
+		timeutil.Now = time.Now
+		return nil
+	}
 	return f
 }
 
@@ -194,8 +203,8 @@ func newCondition(reason string, experiment *v1alpha1.Experiment) *v1alpha1.Expe
 		return &v1alpha1.ExperimentCondition{
 			Type:               v1alpha1.ExperimentProgressing,
 			Status:             corev1.ConditionTrue,
-			LastUpdateTime:     metav1.Now().Rfc3339Copy(),
-			LastTransitionTime: metav1.Now().Rfc3339Copy(),
+			LastUpdateTime:     timeutil.MetaNow().Rfc3339Copy(),
+			LastTransitionTime: timeutil.MetaNow().Rfc3339Copy(),
 			Reason:             reason,
 			Message:            fmt.Sprintf(conditions.ExperimentProgressingMessage, experiment.Name),
 		}
@@ -204,8 +213,8 @@ func newCondition(reason string, experiment *v1alpha1.Experiment) *v1alpha1.Expe
 		return &v1alpha1.ExperimentCondition{
 			Type:               v1alpha1.ExperimentProgressing,
 			Status:             corev1.ConditionFalse,
-			LastUpdateTime:     metav1.Now().Rfc3339Copy(),
-			LastTransitionTime: metav1.Now().Rfc3339Copy(),
+			LastUpdateTime:     timeutil.MetaNow().Rfc3339Copy(),
+			LastTransitionTime: timeutil.MetaNow().Rfc3339Copy(),
 			Reason:             reason,
 			Message:            fmt.Sprintf(conditions.ExperimentCompletedMessage, experiment.Name),
 		}
@@ -214,8 +223,8 @@ func newCondition(reason string, experiment *v1alpha1.Experiment) *v1alpha1.Expe
 		return &v1alpha1.ExperimentCondition{
 			Type:               v1alpha1.ExperimentProgressing,
 			Status:             corev1.ConditionFalse,
-			LastUpdateTime:     metav1.Now().Rfc3339Copy(),
-			LastTransitionTime: metav1.Now().Rfc3339Copy(),
+			LastUpdateTime:     timeutil.MetaNow().Rfc3339Copy(),
+			LastTransitionTime: timeutil.MetaNow().Rfc3339Copy(),
 			Reason:             reason,
 			Message:            fmt.Sprintf(conditions.ExperimentRunningMessage, experiment.Name),
 		}
@@ -224,13 +233,39 @@ func newCondition(reason string, experiment *v1alpha1.Experiment) *v1alpha1.Expe
 		return &v1alpha1.ExperimentCondition{
 			Type:               v1alpha1.InvalidExperimentSpec,
 			Status:             corev1.ConditionTrue,
-			LastUpdateTime:     metav1.Now().Rfc3339Copy(),
-			LastTransitionTime: metav1.Now().Rfc3339Copy(),
+			LastUpdateTime:     timeutil.MetaNow().Rfc3339Copy(),
+			LastTransitionTime: timeutil.MetaNow().Rfc3339Copy(),
 			Reason:             reason,
 			Message:            fmt.Sprintf(conditions.ExperimentTemplateNameEmpty, experiment.Name, 0),
 		}
 	}
 
+	return nil
+}
+
+func templateToService(ex *v1alpha1.Experiment, template v1alpha1.TemplateSpec, replicaSet appsv1.ReplicaSet) *corev1.Service {
+	if template.Service != nil {
+		service := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      replicaSet.Name,
+				Namespace: replicaSet.Namespace,
+				Annotations: map[string]string{
+					v1alpha1.ExperimentNameAnnotationKey:         ex.Name,
+					v1alpha1.ExperimentTemplateNameAnnotationKey: template.Name,
+				},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ex, experimentKind)},
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: replicaSet.Spec.Selector.MatchLabels,
+				Ports: []corev1.ServicePort{{
+					Protocol:   "TCP",
+					Port:       int32(80),
+					TargetPort: intstr.FromInt(8080),
+				}},
+			},
+		}
+		return service
+	}
 	return nil
 }
 
@@ -325,7 +360,7 @@ func (f *fixture) newController(resync resyncFunc) (*Controller, informers.Share
 	metricsServer := metrics.NewMetricsServer(metrics.ServerConfig{
 		Addr:               "localhost:8080",
 		K8SRequestProvider: &metrics.K8sRequestsCountProvider{},
-	})
+	}, true)
 
 	c := NewController(ControllerConfig{
 		KubeClientSet:                   f.kubeclient,
@@ -335,6 +370,7 @@ func (f *fixture) newController(resync resyncFunc) (*Controller, informers.Share
 		AnalysisRunInformer:             i.Argoproj().V1alpha1().AnalysisRuns(),
 		AnalysisTemplateInformer:        i.Argoproj().V1alpha1().AnalysisTemplates(),
 		ClusterAnalysisTemplateInformer: i.Argoproj().V1alpha1().ClusterAnalysisTemplates(),
+		ServiceInformer:                 k8sI.Core().V1().Services(),
 		ResyncPeriod:                    resync(),
 		RolloutWorkQueue:                rolloutWorkqueue,
 		ExperimentWorkQueue:             experimentWorkqueue,
@@ -369,6 +405,10 @@ func (f *fixture) newController(resync resyncFunc) (*Controller, informers.Share
 
 	for _, r := range f.replicaSetLister {
 		k8sI.Apps().V1().ReplicaSets().Informer().GetIndexer().Add(r)
+	}
+
+	for _, r := range f.serviceLister {
+		k8sI.Core().V1().Services().Informer().GetIndexer().Add(r)
 	}
 
 	for _, r := range f.analysisRunLister {
@@ -484,13 +524,27 @@ func filterInformerActions(actions []core.Action) []core.Action {
 			action.Matches("list", "clusteranalysistemplates") ||
 			action.Matches("watch", "clusteranalysistemplates") ||
 			action.Matches("list", "analysisruns") ||
-			action.Matches("watch", "analysisruns") {
+			action.Matches("watch", "analysisruns") ||
+			action.Matches("watch", "services") ||
+			action.Matches("list", "services") {
 			continue
 		}
 		ret = append(ret, action)
 	}
 
 	return ret
+}
+
+func (f *fixture) expectCreateServiceAction(service *corev1.Service) int {
+	len := len(f.kubeactions)
+	f.kubeactions = append(f.kubeactions, core.NewCreateAction(schema.GroupVersionResource{Resource: "services"}, service.Namespace, service))
+	return len
+}
+
+func (f *fixture) expectDeleteServiceAction(service *corev1.Service) int {
+	len := len(f.kubeactions)
+	f.kubeactions = append(f.kubeactions, core.NewDeleteAction(schema.GroupVersionResource{Resource: "services"}, service.Namespace, service.Name))
+	return len
 }
 
 func (f *fixture) expectCreateReplicaSetAction(r *appsv1.ReplicaSet) int {
@@ -586,6 +640,27 @@ func (f *fixture) getCreatedReplicaSet(index int) *appsv1.ReplicaSet {
 	return rs
 }
 
+func (f *fixture) verifyPatchedReplicaSetAddScaleDownDelay(index int, scaleDownDelaySeconds int32) {
+	action := filterInformerActions(f.kubeclient.Actions())[index]
+	patchAction, ok := action.(core.PatchAction)
+	if !ok {
+		assert.Fail(f.t, "Expected Patch action, not %s", action.GetVerb())
+	}
+	now := timeutil.Now().Add(time.Duration(scaleDownDelaySeconds) * time.Second).UTC().Format(time.RFC3339)
+	patch := fmt.Sprintf(addScaleDownAtAnnotationsPatch, v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey, now)
+	assert.Equal(f.t, string(patchAction.GetPatch()), patch)
+}
+
+func (f *fixture) verifyPatchedReplicaSetRemoveScaleDownDelayAnnotation(index int) {
+	action := filterInformerActions(f.kubeclient.Actions())[index]
+	patchAction, ok := action.(core.PatchAction)
+	if !ok {
+		assert.Fail(f.t, "Expected Patch action, not %s", action.GetVerb())
+	}
+	patch := fmt.Sprintf(removeScaleDownAtAnnotationsPatch, v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey)
+	assert.Equal(f.t, string(patchAction.GetPatch()), patch)
+}
+
 func (f *fixture) getUpdatedReplicaSet(index int) *appsv1.ReplicaSet {
 	action := filterInformerActions(f.kubeclient.Actions())[index]
 	updateAction, ok := action.(core.UpdateAction)
@@ -656,7 +731,7 @@ func TestNoReconcileForDeletedExperiment(t *testing.T) {
 	defer f.Close()
 
 	e := newExperiment("foo", nil, "10s")
-	now := metav1.Now()
+	now := timeutil.MetaNow()
 	e.DeletionTimestamp = &now
 
 	f.experimentLister = append(f.experimentLister, e)

@@ -28,6 +28,8 @@ const (
 	MissingFieldMessage = "Rollout has missing field '%s'"
 	// InvalidSetWeightMessage indicates the setweight value needs to be between 0 and 100
 	InvalidSetWeightMessage = "SetWeight needs to be between 0 and 100"
+	// InvalidCanaryExperimentTemplateWeightWithoutTrafficRouting indicates experiment weight cannot be set without trafficRouting
+	InvalidCanaryExperimentTemplateWeightWithoutTrafficRouting = "Experiment template weight cannot be set unless TrafficRouting is enabled"
 	// InvalidSetCanaryScaleTrafficPolicy indicates that TrafficRouting, required for SetCanaryScale, is missing
 	InvalidSetCanaryScaleTrafficPolicy = "SetCanaryScale requires TrafficRouting to be set"
 	// InvalidDurationMessage indicates the Duration value needs to be greater than 0
@@ -40,7 +42,7 @@ const (
 	InvalidStrategyMessage = "Multiple Strategies can not be listed"
 	// DuplicatedServicesBlueGreenMessage the message to indicate that the rollout uses the same service for the active and preview services
 	DuplicatedServicesBlueGreenMessage = "This rollout uses the same service for the active and preview services, but two different services are required."
-	// DuplicatedServicesMessage the message to indicate that the rollout uses the same service for the active and preview services
+	// DuplicatedServicesCanaryMessage indicates that the rollout uses the same service for the stable and canary services
 	DuplicatedServicesCanaryMessage = "This rollout uses the same service for the stable and canary services, but two different services are required."
 	// InvalidAntiAffinityStrategyMessage indicates that Anti-Affinity can only have one strategy listed
 	InvalidAntiAffinityStrategyMessage = "AntiAffinity must have exactly one strategy listed"
@@ -55,6 +57,10 @@ const (
 	InvalidAnalysisArgsMessage = "Analyses arguments must refer to valid object metadata supported by downwardAPI"
 	// InvalidCanaryScaleDownDelay indicates that canary.scaleDownDelaySeconds cannot be used
 	InvalidCanaryScaleDownDelay = "Canary scaleDownDelaySeconds can only be used with traffic routing"
+	// InvalidCanaryDynamicStableScale indicates that canary.dynamicStableScale cannot be used
+	InvalidCanaryDynamicStableScale = "Canary dynamicStableScale can only be used with traffic routing"
+	// InvalidCanaryDynamicStableScaleWithScaleDownDelay indicates that canary.dynamicStableScale cannot be used with scaleDownDelaySeconds
+	InvalidCanaryDynamicStableScaleWithScaleDownDelay = "Canary dynamicStableScale cannot be used with scaleDownDelaySeconds"
 )
 
 func ValidateRollout(rollout *v1alpha1.Rollout) field.ErrorList {
@@ -217,8 +223,17 @@ func ValidateRolloutStrategyCanary(rollout *v1alpha1.Rollout, fldPath *field.Pat
 		}
 	}
 
-	if canary.ScaleDownDelaySeconds != nil && canary.TrafficRouting == nil {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("scaleDownDelaySeconds"), *canary.ScaleDownDelaySeconds, InvalidCanaryScaleDownDelay))
+	if canary.TrafficRouting == nil {
+		if canary.ScaleDownDelaySeconds != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("scaleDownDelaySeconds"), *canary.ScaleDownDelaySeconds, InvalidCanaryScaleDownDelay))
+		}
+		if canary.DynamicStableScale {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("dynamicStableScale"), canary.DynamicStableScale, InvalidCanaryDynamicStableScale))
+		}
+	} else {
+		if canary.ScaleDownDelaySeconds != nil && canary.DynamicStableScale {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("dynamicStableScale"), canary.DynamicStableScale, InvalidCanaryDynamicStableScaleWithScaleDownDelay))
+		}
 	}
 
 	for i, step := range canary.Steps {
@@ -238,8 +253,17 @@ func ValidateRolloutStrategyCanary(rollout *v1alpha1.Rollout, fldPath *field.Pat
 		if rollout.Spec.Strategy.Canary != nil && rollout.Spec.Strategy.Canary.TrafficRouting == nil && step.SetCanaryScale != nil {
 			allErrs = append(allErrs, field.Invalid(stepFldPath.Child("setCanaryScale"), step.SetCanaryScale, InvalidSetCanaryScaleTrafficPolicy))
 		}
-		analysisRunArgs := []v1alpha1.AnalysisRunArgument{}
+		analysisRunArgs := make([]v1alpha1.AnalysisRunArgument, 0)
 		if step.Experiment != nil {
+			for tmplIndex, template := range step.Experiment.Templates {
+				if template.Weight != nil {
+					if canary.TrafficRouting == nil {
+						allErrs = append(allErrs, field.Invalid(stepFldPath.Child("experiment").Child("templates").Index(tmplIndex).Child("weight"), *canary.Steps[i].Experiment.Templates[tmplIndex].Weight, InvalidCanaryExperimentTemplateWeightWithoutTrafficRouting))
+					} else if canary.TrafficRouting.ALB == nil && canary.TrafficRouting.SMI == nil && canary.TrafficRouting.Istio == nil {
+						allErrs = append(allErrs, field.Invalid(stepFldPath.Child("experiment").Child("templates").Index(tmplIndex).Child("weight"), *canary.Steps[i].Experiment.Templates[tmplIndex].Weight, "Experiment template weight is only available for TrafficRouting with SMI, ALB, and Istio at this time"))
+					}
+				}
+			}
 			for _, analysis := range step.Experiment.Analyses {
 				for _, arg := range analysis.Args {
 					analysisRunArgs = append(analysisRunArgs, arg)

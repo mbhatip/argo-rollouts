@@ -12,8 +12,10 @@ import (
 	patchtypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
+	informersv1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	appslisters "k8s.io/client-go/listers/apps/v1"
+	listersv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubernetes/pkg/controller"
@@ -30,6 +32,7 @@ import (
 	"github.com/argoproj/argo-rollouts/utils/diff"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
 	"github.com/argoproj/argo-rollouts/utils/record"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 	unstructuredutil "github.com/argoproj/argo-rollouts/utils/unstructured"
 )
 
@@ -48,6 +51,7 @@ type Controller struct {
 	analysisTemplateLister        listers.AnalysisTemplateLister
 	clusterAnalysisTemplateLister listers.ClusterAnalysisTemplateLister
 	analysisRunLister             listers.AnalysisRunLister
+	serviceLister                 listersv1.ServiceLister
 
 	replicaSetSynced              cache.InformerSynced
 	experimentSynced              cache.InformerSynced
@@ -83,6 +87,7 @@ type ControllerConfig struct {
 	AnalysisRunInformer             informers.AnalysisRunInformer
 	AnalysisTemplateInformer        informers.AnalysisTemplateInformer
 	ClusterAnalysisTemplateInformer informers.ClusterAnalysisTemplateInformer
+	ServiceInformer                 informersv1.ServiceInformer
 	ResyncPeriod                    time.Duration
 	RolloutWorkQueue                workqueue.RateLimitingInterface
 	ExperimentWorkQueue             workqueue.RateLimitingInterface
@@ -107,6 +112,7 @@ func NewController(cfg ControllerConfig) *Controller {
 		analysisTemplateLister:        cfg.AnalysisTemplateInformer.Lister(),
 		clusterAnalysisTemplateLister: cfg.ClusterAnalysisTemplateInformer.Lister(),
 		analysisRunLister:             cfg.AnalysisRunInformer.Lister(),
+		serviceLister:                 cfg.ServiceInformer.Lister(),
 		metricsServer:                 cfg.MetricsServer,
 		rolloutWorkqueue:              cfg.RolloutWorkQueue,
 		experimentWorkqueue:           cfg.ExperimentWorkQueue,
@@ -227,7 +233,7 @@ func (ec *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 }
 
 func (ec *Controller) syncHandler(key string) error {
-	startTime := time.Now()
+	startTime := timeutil.Now()
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return err
@@ -275,16 +281,24 @@ func (ec *Controller) syncHandler(key string) error {
 		return err
 	}
 
+	templateServices, err := ec.getServicesForExperiment(experiment)
+	if err != nil {
+		return err
+	}
+
 	exCtx := newExperimentContext(
 		experiment,
 		templateRSs,
+		templateServices,
 		ec.kubeclientset,
 		ec.argoProjClientset,
 		ec.replicaSetLister,
 		ec.analysisTemplateLister,
 		ec.clusterAnalysisTemplateLister,
 		ec.analysisRunLister,
+		ec.serviceLister,
 		ec.recorder,
+		ec.resyncPeriod,
 		ec.enqueueExperimentAfter,
 	)
 

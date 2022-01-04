@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
@@ -24,6 +25,7 @@ import (
 	"github.com/argoproj/argo-rollouts/utils/conditions"
 	"github.com/argoproj/argo-rollouts/utils/defaults"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 )
 
 // FindNewReplicaSet returns the new RS this given rollout targets from the given list.
@@ -203,7 +205,7 @@ func IfInjectedAntiAffinityRuleNeedsUpdate(affinity *corev1.Affinity, rollout v1
 }
 
 func NeedsRestart(rollout *v1alpha1.Rollout) bool {
-	now := metav1.Now().UTC()
+	now := timeutil.MetaNow().UTC()
 	if rollout.Spec.RestartAt == nil {
 		return false
 	}
@@ -231,29 +233,44 @@ func FindOldReplicaSets(rollout *v1alpha1.Rollout, rsList []*appsv1.ReplicaSet) 
 // When one of the followings is true, we're rolling out the deployment; otherwise, we're scaling it.
 // 1) The new RS is saturated: newRS's replicas == deployment's replicas
 // 2) Max number of pods allowed is reached: deployment's replicas + maxSurge == all RSs' replicas
-func NewRSNewReplicas(rollout *v1alpha1.Rollout, allRSs []*appsv1.ReplicaSet, newRS *appsv1.ReplicaSet) (int32, error) {
+func NewRSNewReplicas(rollout *v1alpha1.Rollout, allRSs []*appsv1.ReplicaSet, newRS *appsv1.ReplicaSet, weights *v1alpha1.TrafficWeights) (int32, error) {
 	if rollout.Spec.Strategy.BlueGreen != nil {
+		desiredReplicas := defaults.GetReplicasOrDefault(rollout.Spec.Replicas)
 		if rollout.Spec.Strategy.BlueGreen.PreviewReplicaCount != nil {
 			activeRS, _ := GetReplicaSetByTemplateHash(allRSs, rollout.Status.BlueGreen.ActiveSelector)
 			if activeRS == nil || activeRS.Name == newRS.Name {
-				return defaults.GetReplicasOrDefault(rollout.Spec.Replicas), nil
+				// the active RS is our desired RS. we are already past the blue-green promote step
+				return desiredReplicas, nil
+			}
+			if rollout.Status.PromoteFull {
+				// we are doing a full promotion. ignore previewReplicaCount
+				return desiredReplicas, nil
 			}
 			if newRS.Labels[v1alpha1.DefaultRolloutUniqueLabelKey] != rollout.Status.CurrentPodHash {
+				// the desired RS is not equal to our previously recorded current RS.
+				// This must be a new update, so return previewReplicaCount
 				return *rollout.Spec.Strategy.BlueGreen.PreviewReplicaCount, nil
 			}
 			isNotPaused := !rollout.Spec.Paused && len(rollout.Status.PauseConditions) == 0
 			if isNotPaused && rollout.Status.BlueGreen.ScaleUpPreviewCheckPoint {
-				return defaults.GetReplicasOrDefault(rollout.Spec.Replicas), nil
+				// We are not paused, but we are already past our preview scale up checkpoint.
+				// If we get here, we were resumed after the pause, but haven't yet flipped the
+				// active service switch to the desired RS.
+				return desiredReplicas, nil
 			}
 			return *rollout.Spec.Strategy.BlueGreen.PreviewReplicaCount, nil
 		}
-
-		return defaults.GetReplicasOrDefault(rollout.Spec.Replicas), nil
+		return desiredReplicas, nil
 	}
 	if rollout.Spec.Strategy.Canary != nil {
 		stableRS := GetStableRS(rollout, newRS, allRSs)
-		otherRSs := GetOtherRSs(rollout, newRS, stableRS, allRSs)
-		newRSReplicaCount, _ := CalculateReplicaCountsForCanary(rollout, newRS, stableRS, otherRSs)
+		var newRSReplicaCount int32
+		if rollout.Spec.Strategy.Canary.TrafficRouting == nil {
+			otherRSs := GetOtherRSs(rollout, newRS, stableRS, allRSs)
+			newRSReplicaCount, _ = CalculateReplicaCountsForBasicCanary(rollout, newRS, stableRS, otherRSs)
+		} else {
+			newRSReplicaCount, _ = CalculateReplicaCountsForTrafficRoutedCanary(rollout, weights)
+		}
 		return newRSReplicaCount, nil
 	}
 	return 0, fmt.Errorf("no rollout strategy provided")
@@ -493,12 +510,21 @@ func PodTemplateEqualIgnoreHash(live, desired *corev1.PodTemplateSpec) bool {
 	}
 	corev1defaults.SetObjectDefaults_PodTemplate(&podTemplate)
 	desired = &podTemplate.Template
+
+	// Do not allow the deprecated spec.serviceAccount to factor into the equality check. In live
+	// ReplicaSet pod template, this field will be populated, but in the desired pod template
+	// it will be missing (even after defaulting), causing us to believe there is a diff
+	// (when there really wasn't), and hence causing an unsolicited update to be triggered.
+	// See: https://github.com/argoproj/argo-rollouts/issues/1356
+	desired.Spec.DeprecatedServiceAccount = ""
+	live.Spec.DeprecatedServiceAccount = ""
+
 	return apiequality.Semantic.DeepEqual(live, desired)
 }
 
 // GetPodTemplateHash returns the rollouts-pod-template-hash value from a ReplicaSet's labels
 func GetPodTemplateHash(rs *appsv1.ReplicaSet) string {
-	if rs.Labels == nil {
+	if rs == nil || rs.Labels == nil {
 		return ""
 	}
 	return rs.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]
@@ -562,6 +588,23 @@ func HasScaleDownDeadline(rs *appsv1.ReplicaSet) bool {
 	return rs.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey] != ""
 }
 
+func GetTimeRemainingBeforeScaleDownDeadline(rs *appsv1.ReplicaSet) (*time.Duration, error) {
+	if HasScaleDownDeadline(rs) {
+		scaleDownAtStr := rs.Annotations[v1alpha1.DefaultReplicaSetScaleDownDeadlineAnnotationKey]
+		scaleDownAtTime, err := time.Parse(time.RFC3339, scaleDownAtStr)
+		if err != nil {
+			return nil, fmt.Errorf("unable to read scaleDownAt label on rs '%s'", rs.Name)
+		}
+		now := timeutil.MetaNow()
+		scaleDownAt := metav1.NewTime(scaleDownAtTime)
+		if scaleDownAt.After(now.Time) {
+			remainingTime := scaleDownAt.Sub(now.Time)
+			return &remainingTime, nil
+		}
+	}
+	return nil, nil
+}
+
 // GetPodsOwnedByReplicaSet returns a list of pods owned by the given replicaset
 func GetPodsOwnedByReplicaSet(ctx context.Context, client kubernetes.Interface, rs *appsv1.ReplicaSet) ([]*corev1.Pod, error) {
 	pods, err := client.CoreV1().Pods(rs.Namespace).List(ctx, metav1.ListOptions{
@@ -578,4 +621,14 @@ func GetPodsOwnedByReplicaSet(ctx context.Context, client kubernetes.Interface, 
 		}
 	}
 	return podOwnedByRS, nil
+}
+
+// IsReplicaSetReady returns if a ReplicaSet is scaled up and its ready count is >= desired count
+func IsReplicaSetReady(rs *appsv1.ReplicaSet) bool {
+	if rs == nil {
+		return false
+	}
+	replicas := rs.Spec.Replicas
+	readyReplicas := rs.Status.ReadyReplicas
+	return replicas != nil && *replicas != 0 && readyReplicas != 0 && *replicas <= readyReplicas
 }

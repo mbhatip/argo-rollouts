@@ -496,6 +496,20 @@
     }
   },
   "definitions": {
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.ALBStatus": {
+      "type": "object",
+      "properties": {
+        "loadBalancer": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AwsResourceRef"
+        },
+        "canaryTargetGroup": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AwsResourceRef"
+        },
+        "stableTargetGroup": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AwsResourceRef"
+        }
+      }
+    },
     "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.ALBTrafficRouting": {
       "type": "object",
       "properties": {
@@ -511,6 +525,10 @@
         "rootService": {
           "type": "string",
           "title": "RootService references the service in the ingress to the controller should add the action to"
+        },
+        "stickinessConfig": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.StickinessConfig",
+          "title": "AdditionalForwardConfig allows to specify further settings on the ForwaredConfig\n+optional"
         },
         "annotationPrefix": {
           "type": "string",
@@ -550,6 +568,22 @@
       },
       "title": "AnalysisRunArgument argument to add to analysisRun"
     },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AnalysisRunStrategy": {
+      "type": "object",
+      "properties": {
+        "successfulRunHistoryLimit": {
+          "type": "integer",
+          "format": "int32",
+          "title": "SuccessfulRunHistoryLimit limits the number of old successful analysis runs and experiments to be retained in a history"
+        },
+        "unsuccessfulRunHistoryLimit": {
+          "type": "integer",
+          "format": "int32",
+          "title": "UnsuccessfulRunHistoryLimit limits the number of old unsuccessful analysis runs and experiments to be retained in a history.\nStages for unsuccessful: \"Error\", \"Failed\", \"Inconclusive\""
+        }
+      },
+      "title": "AnalysisRunStrategy configuration for the analysis runs and experiments to retain"
+    },
     "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AntiAffinity": {
       "type": "object",
       "properties": {
@@ -577,6 +611,17 @@
         }
       },
       "title": "ArgumentValueFrom defines references to fields within resources to grab for the value (i.e. Pod Template Hash)"
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AwsResourceRef": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "arn": {
+          "type": "string"
+        }
+      }
     },
     "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.BlueGreenStatus": {
       "type": "object",
@@ -662,6 +707,11 @@
         "activeMetadata": {
           "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.PodTemplateMetadata",
           "title": "ActiveMetadata specify labels and annotations which will be attached to the active pods for\nthe duration which they act as a active pod, and will be removed after"
+        },
+        "abortScaleDownDelaySeconds": {
+          "type": "integer",
+          "format": "int32",
+          "title": "AbortScaleDownDelaySeconds adds a delay in second before scaling down the preview replicaset\nif update is aborted. 0 means not to scale down.\nDefault is 30 second\n+optional"
         }
       },
       "title": "BlueGreenStrategy defines parameters for Blue Green deployment"
@@ -680,6 +730,10 @@
         "currentExperiment": {
           "type": "string",
           "title": "CurrentExperiment indicates the running experiment"
+        },
+        "weights": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.TrafficWeights",
+          "title": "Weights records the weights which have been set on traffic provider. Only valid when using traffic routing"
         }
       },
       "title": "CanaryStatus status fields that only pertain to the canary rollout"
@@ -766,9 +820,28 @@
           "type": "integer",
           "format": "int32",
           "title": "ScaleDownDelayRevisionLimit limits the number of old RS that can run at one time before getting scaled down\n+optional"
+        },
+        "abortScaleDownDelaySeconds": {
+          "type": "integer",
+          "format": "int32",
+          "title": "AbortScaleDownDelaySeconds adds a delay in second before scaling down the canary pods when update\nis aborted for canary strategy with traffic routing (not applicable for basic canary).\n0 means canary pods are not scaled down.\nDefault is 30 seconds.\n+optional"
+        },
+        "dynamicStableScale": {
+          "type": "boolean",
+          "description": "DynamicStableScale is a traffic routing feature which dynamically scales the stable\nReplicaSet to minimize total pods which are running during an update. This is calculated by\nscaling down the stable as traffic is increased to canary. When disabled (the default behavior)\nthe stable ReplicaSet remains fully scaled to support instantaneous aborts."
         }
       },
       "title": "CanaryStrategy defines parameters for a Replica Based Canary"
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.DryRun": {
+      "type": "object",
+      "properties": {
+        "metricName": {
+          "type": "string",
+          "description": "Name of the metric which needs to be evaluated in the Dry-Run mode. Wildcard '*' is supported and denotes all\nthe available metrics."
+        }
+      },
+      "description": "DryRun defines the settings for running the analysis in Dry-Run mode."
     },
     "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.FieldRef": {
       "type": "object",
@@ -807,6 +880,13 @@
         "destinationRule": {
           "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.IstioDestinationRule",
           "title": "DestinationRule references an Istio DestinationRule to modify to shape traffic"
+        },
+        "virtualServices": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.IstioVirtualService"
+          },
+          "title": "VirtualServices references a list of Istio VirtualService to modify to shape traffic"
         }
       },
       "title": "IstioTrafficRouting configuration for Istio service mesh to enable fine grain configuration"
@@ -823,7 +903,14 @@
           "items": {
             "type": "string"
           },
-          "title": "Routes are list of routes within VirtualService to edit. If omitted, VirtualService must have a single route"
+          "description": "A list of HTTP routes within VirtualService to edit. If omitted, VirtualService must have a single route of this type."
+        },
+        "tlsRoutes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.TLSRoute"
+          },
+          "description": "A list of TLS/HTTPS routes within VirtualService to edit. If omitted, VirtualService must have a single route of this type."
         }
       },
       "title": "IstioVirtualService holds information on the virtual service the rollout needs to modify"
@@ -958,6 +1045,13 @@
             "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AnalysisRunArgument"
           },
           "title": "Args the arguments that will be added to the AnalysisRuns\n+patchMergeKey=name\n+patchStrategy=merge"
+        },
+        "dryRun": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.DryRun"
+          },
+          "title": "DryRun object contains the settings for running the analysis in Dry-Run mode\n+patchMergeKey=metricName\n+patchStrategy=merge\n+optional"
         }
       },
       "title": "RolloutAnalysis defines a template that is used to create a analysisRun"
@@ -1108,6 +1202,11 @@
         "selector": {
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.LabelSelector",
           "title": "Selector overrides the selector to be used for the template's ReplicaSet. If omitted, will\nuse the same selector as the Rollout\n+optional"
+        },
+        "weight": {
+          "type": "integer",
+          "format": "int32",
+          "title": "Weight sets the percentage of traffic the template's replicas should receive"
         }
       },
       "title": "RolloutExperimentTemplate defines the template used to create experiments for the Rollout's experiment canary step"
@@ -1165,9 +1264,17 @@
           "format": "int32",
           "description": "ProgressDeadlineSeconds The maximum time in seconds for a rollout to\nmake progress before it is considered to be failed. Argo Rollouts will\ncontinue to process failed rollouts and a condition with a\nProgressDeadlineExceeded reason will be surfaced in the rollout status.\nNote that progress will not be estimated during the time a rollout is paused.\nDefaults to 600s."
         },
+        "progressDeadlineAbort": {
+          "type": "boolean",
+          "title": "ProgressDeadlineAbort is whether to abort the update when ProgressDeadlineSeconds\nis exceeded if analysis is not used. Default is false.\n+optional"
+        },
         "restartAt": {
           "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.Time",
           "title": "RestartAt indicates when all the pods of a Rollout should be restarted"
+        },
+        "analysis": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.AnalysisRunStrategy",
+          "title": "Analysis configuration for the analysis runs to retain"
         }
       },
       "title": "RolloutSpec is the spec for a Rollout resource"
@@ -1236,10 +1343,6 @@
           "type": "string",
           "title": "The generation observed by the rollout controller from metadata.generation\n+optional"
         },
-        "workloadObservedGeneration": {
-          "type": "string",
-          "title": "The generation of referenced workload observed by the rollout controller\n+optional"
-        },
         "conditions": {
           "type": "array",
           "items": {
@@ -1283,6 +1386,14 @@
         "message": {
           "type": "string",
           "title": "Message provides details on why the rollout is in its current phase"
+        },
+        "workloadObservedGeneration": {
+          "type": "string",
+          "title": "The generation of referenced workload observed by the rollout controller\n+optional"
+        },
+        "alb": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.ALBStatus",
+          "title": "/ ALB keeps information regarding the ALB and TargetGroups"
         }
       },
       "title": "RolloutStatus is the status for a Rollout resource"
@@ -1364,6 +1475,79 @@
         }
       },
       "title": "SetCanaryScale defines how to scale the newRS without changing traffic weight"
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.StickinessConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "durationSeconds": {
+          "type": "string",
+          "format": "int64"
+        }
+      }
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.TLSRoute": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "string",
+          "format": "int64",
+          "description": "Port number of the TLS Route desired to be matched in the given Istio VirtualService."
+        },
+        "sniHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "A list of all the SNI Hosts of the TLS Route desired to be matched in the given Istio VirtualService."
+        }
+      },
+      "description": "TLSRoute holds the information on the virtual service's TLS/HTTPS routes that are desired to be matched for changing weights."
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.TrafficWeights": {
+      "type": "object",
+      "properties": {
+        "canary": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.WeightDestination",
+          "title": "Canary is the current traffic weight split to canary ReplicaSet"
+        },
+        "stable": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.WeightDestination",
+          "title": "Stable is the current traffic weight split to stable ReplicaSet"
+        },
+        "additional": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.WeightDestination"
+          },
+          "title": "Additional holds the weights split to additional ReplicaSets such as experiment ReplicaSets"
+        },
+        "verified": {
+          "type": "boolean",
+          "title": "Verified is an optional indicator that the weight has been verified to have taken effect.\nThis is currently only applicable to ALB traffic router"
+        }
+      },
+      "title": "TrafficWeights describes the current status of how traffic has been split"
+    },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.WeightDestination": {
+      "type": "object",
+      "properties": {
+        "weight": {
+          "type": "integer",
+          "format": "int32",
+          "title": "Weight is an percentage of traffic being sent to this destination"
+        },
+        "serviceName": {
+          "type": "string",
+          "title": "ServiceName is the Kubernetes service name traffic is being sent to"
+        },
+        "podTemplateHash": {
+          "type": "string",
+          "title": "PodTemplateHash is the pod template hash label for this destination"
+        }
+      }
     },
     "google.protobuf.Any": {
       "type": "object",
@@ -1745,7 +1929,7 @@
         },
         "resources": {
           "$ref": "#/definitions/k8s.io.api.core.v1.ResourceRequirements",
-          "title": "Compute Resources required by this container.\nCannot be updated.\nMore info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/\n+optional"
+          "title": "Compute Resources required by this container.\nCannot be updated.\nMore info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/\n+optional"
         },
         "volumeMounts": {
           "type": "array",
@@ -2097,10 +2281,6 @@
         "volumeClaimTemplate": {
           "$ref": "#/definitions/k8s.io.api.core.v1.PersistentVolumeClaimTemplate",
           "description": "Will be used to create a stand-alone PVC to provision the volume.\nThe pod in which this EphemeralVolumeSource is embedded will be the\nowner of the PVC, i.e. the PVC will be deleted together with the\npod.  The name of the PVC will be `\u003cpod name\u003e-\u003cvolume name\u003e` where\n`\u003cvolume name\u003e` is the name from the `PodSpec.Volumes` array\nentry. Pod validation will reject the pod if the concatenated name\nis not valid for a PVC (for example, too long).\n\nAn existing PVC with that name that is not owned by the pod\nwill *not* be used for the pod to avoid using an unrelated\nvolume by mistake. Starting the pod is then blocked until\nthe unrelated PVC is removed. If such a pre-created PVC is\nmeant to be used by the pod, the PVC has to updated with an\nowner reference to the pod once the pod exists. Normally\nthis should not be necessary, but it may be useful when\nmanually reconstructing a broken cluster.\n\nThis field is read-only and no changes will be made by Kubernetes\nto the PVC after it has been created.\n\nRequired, must not be nil."
-        },
-        "readOnly": {
-          "type": "boolean",
-          "title": "Specifies a read-only configuration for the volume.\nDefaults to false (read/write).\n+optional"
         }
       },
       "description": "Represents an ephemeral volume that is handled by a normal storage driver."
@@ -2656,11 +2836,15 @@
           "items": {
             "type": "string"
           },
-          "title": "namespaces specifies which namespaces the labelSelector applies to (matches against);\nnull or empty list means \"this pod's namespace\"\n+optional"
+          "title": "namespaces specifies a static list of namespace names that the term applies to.\nThe term is applied to the union of the namespaces listed in this field\nand the ones selected by namespaceSelector.\nnull or empty namespaces list and null namespaceSelector means \"this pod's namespace\"\n+optional"
         },
         "topologyKey": {
           "type": "string",
           "description": "This pod should be co-located (affinity) or not co-located (anti-affinity) with the pods matching\nthe labelSelector in the specified namespaces, where co-located is defined as running on a node\nwhose value of the label with key topologyKey matches that of any node on which any of the\nselected pods is running.\nEmpty topologyKey is not allowed."
+        },
+        "namespaceSelector": {
+          "$ref": "#/definitions/k8s.io.apimachinery.pkg.apis.meta.v1.LabelSelector",
+          "title": "A label query over the set of namespaces that the term applies to.\nThe term is applied to the union of the namespaces selected by this field\nand the ones listed in the namespaces field.\nnull selector and null or empty namespaces list means \"this pod's namespace\".\nAn empty selector ({}) matches all namespaces.\nThis field is alpha-level and is only honored when PodAffinityNamespaceSelector feature is enabled.\n+optional"
         }
       },
       "title": "Defines a set of pods (namely those matching the labelSelector\nrelative to the given namespace(s)) that this pod should be\nco-located (affinity) or not co-located (anti-affinity) with,\nwhere co-located is defined as running on a node whose value of\nthe label with key \u003ctopologyKey\u003e matches that of any node on which\na pod of the set of pods is running"
@@ -2831,7 +3015,7 @@
         "terminationGracePeriodSeconds": {
           "type": "string",
           "format": "int64",
-          "title": "Optional duration in seconds the pod needs to terminate gracefully. May be decreased in delete request.\nValue must be non-negative integer. The value zero indicates delete immediately.\nIf this value is nil, the default grace period will be used instead.\nThe grace period is the duration in seconds after the processes running in the pod are sent\na termination signal and the time when the processes are forcibly halted with a kill signal.\nSet this value longer than the expected cleanup time for your process.\nDefaults to 30 seconds.\n+optional"
+          "title": "Optional duration in seconds the pod needs to terminate gracefully. May be decreased in delete request.\nValue must be non-negative integer. The value zero indicates stop immediately via\nthe kill signal (no opportunity to shut down).\nIf this value is nil, the default grace period will be used instead.\nThe grace period is the duration in seconds after the processes running in the pod are sent\na termination signal and the time when the processes are forcibly halted with a kill signal.\nSet this value longer than the expected cleanup time for your process.\nDefaults to 30 seconds.\n+optional"
         },
         "activeDeadlineSeconds": {
           "type": "string",
@@ -3053,6 +3237,11 @@
           "type": "integer",
           "format": "int32",
           "title": "Minimum consecutive failures for the probe to be considered failed after having succeeded.\nDefaults to 3. Minimum value is 1.\n+optional"
+        },
+        "terminationGracePeriodSeconds": {
+          "type": "string",
+          "format": "int64",
+          "title": "Optional duration in seconds the pod needs to terminate gracefully upon probe failure.\nThe grace period is the duration in seconds after the processes running in the pod are sent\na termination signal and the time when the processes are forcibly halted with a kill signal.\nSet this value longer than the expected cleanup time for your process.\nIf this value is nil, the pod's terminationGracePeriodSeconds will be used. Otherwise, this\nvalue overrides the value provided by the pod spec.\nValue must be non-negative integer. The value zero indicates stop immediately via\nthe kill signal (no opportunity to shut down).\nThis is an alpha field and requires enabling ProbeTerminationGracePeriod feature gate.\n+optional"
         }
       },
       "description": "Probe describes a health check to be performed against a container to determine whether it is\nalive or ready to receive traffic."
@@ -3172,14 +3361,14 @@
           "additionalProperties": {
             "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
           },
-          "title": "Limits describes the maximum amount of compute resources allowed.\nMore info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/\n+optional"
+          "title": "Limits describes the maximum amount of compute resources allowed.\nMore info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/\n+optional"
         },
         "requests": {
           "type": "object",
           "additionalProperties": {
             "$ref": "#/definitions/k8s.io.apimachinery.pkg.api.resource.Quantity"
           },
-          "title": "Requests describes the minimum amount of compute resources required.\nIf Requests is omitted for a container, it defaults to Limits if that is explicitly specified,\notherwise to an implementation-defined value.\nMore info: https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/\n+optional"
+          "title": "Requests describes the minimum amount of compute resources required.\nIf Requests is omitted for a container, it defaults to Limits if that is explicitly specified,\notherwise to an implementation-defined value.\nMore info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/\n+optional"
         }
       },
       "description": "ResourceRequirements describes the compute resource requirements."
@@ -3735,7 +3924,7 @@
         },
         "ephemeral": {
           "$ref": "#/definitions/k8s.io.api.core.v1.EphemeralVolumeSource",
-          "description": "Ephemeral represents a volume that is handled by a cluster storage driver (Alpha feature).\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time.\n\n+optional"
+          "description": "Ephemeral represents a volume that is handled by a cluster storage driver.\nThe volume's lifecycle is tied to the pod that defines it - it will be created before the pod starts,\nand deleted when the pod is removed.\n\nUse this if:\na) the volume is only needed while the pod runs,\nb) features of normal volumes like restoring from snapshot or capacity\n   tracking are needed,\nc) the storage driver is specified through a storage class, and\nd) the storage driver supports dynamic volume provisioning through\n   a PersistentVolumeClaim (see EphemeralVolumeSource for more\n   information on the connection between this volume type\n   and PersistentVolumeClaim).\n\nUse PersistentVolumeClaim or one of the vendor-specific\nAPIs for volumes that persist for longer than the lifecycle\nof an individual pod.\n\nUse CSI for light-weight local ephemeral volumes if the CSI driver is meant to\nbe used that way - see the documentation of the driver for\nmore information.\n\nA pod can use both types of ephemeral volumes and\npersistent volumes at the same time.\n\nThis is a beta feature and only available when the GenericEphemeralVolume\nfeature gate is enabled.\n\n+optional"
         }
       },
       "description": "Represents the source of a volume to mount.\nOnly one of its members may be specified."

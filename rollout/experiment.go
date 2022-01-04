@@ -7,6 +7,7 @@ import (
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	analysisutil "github.com/argoproj/argo-rollouts/utils/analysis"
 	"github.com/argoproj/argo-rollouts/utils/annotations"
+	"github.com/argoproj/argo-rollouts/utils/defaults"
 	experimentutil "github.com/argoproj/argo-rollouts/utils/experiment"
 	"github.com/argoproj/argo-rollouts/utils/record"
 	replicasetutil "github.com/argoproj/argo-rollouts/utils/replicaset"
@@ -61,12 +62,15 @@ func GetExperimentFromTemplate(r *v1alpha1.Rollout, stableRS, newRS *appsv1.Repl
 			Name:     templateStep.Name,
 			Replicas: templateStep.Replicas,
 		}
+		if templateStep.Weight != nil {
+			template.Service = &v1alpha1.TemplateService{}
+		}
 		templateRS := &appsv1.ReplicaSet{}
 		switch templateStep.SpecRef {
 		case v1alpha1.CanarySpecRef:
-			templateRS = newRS
+			templateRS = newRS.DeepCopy()
 		case v1alpha1.StableSpecRef:
-			templateRS = stableRS
+			templateRS = stableRS.DeepCopy()
 		default:
 			return nil, fmt.Errorf("Invalid template step SpecRef: must be canary or stable")
 		}
@@ -187,7 +191,9 @@ func (c *rolloutContext) reconcileExperiments() error {
 		return err
 	}
 
-	exsToDelete := experimentutil.FilterExperimentsToDelete(otherExs, c.allRSs)
+	limitSuccessful := defaults.GetAnalysisRunSuccessfulHistoryLimitOrDefault(c.rollout)
+	limitUnsuccessful := defaults.GetAnalysisRunUnsuccessfulHistoryLimitOrDefault(c.rollout)
+	exsToDelete := experimentutil.FilterExperimentsToDelete(otherExs, c.allRSs, limitSuccessful, limitUnsuccessful)
 	err = c.deleteExperiments(exsToDelete)
 	if err != nil {
 		return err
@@ -223,7 +229,7 @@ func (c *rolloutContext) createExperimentWithCollisionHandling(newEx *v1alpha1.E
 			// we likely reconciled the rollout with a stale cache (quite common).
 			return existingEx, nil
 		}
-		newEx.Name = fmt.Sprintf("%s.%d", baseName, collisionCount)
+		newEx.Name = fmt.Sprintf("%s-%d", baseName, collisionCount)
 		collisionCount++
 	}
 }

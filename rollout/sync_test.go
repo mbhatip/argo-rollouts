@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,7 +20,7 @@ import (
 	"github.com/argoproj/argo-rollouts/utils/conditions"
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
 	"github.com/argoproj/argo-rollouts/utils/record"
-	"github.com/stretchr/testify/assert"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 )
 
 func rs(name string, replicas int, selector map[string]string, timestamp metav1.Time, ownerRef *metav1.OwnerReference) *appsv1.ReplicaSet {
@@ -46,7 +47,7 @@ func rs(name string, replicas int, selector map[string]string, timestamp metav1.
 }
 
 func TestReconcileRevisionHistoryLimit(t *testing.T) {
-	now := metav1.Now()
+	now := timeutil.MetaNow()
 	before := metav1.Time{Time: now.Add(-time.Minute)}
 
 	newRS := func(name string) *appsv1.ReplicaSet {
@@ -304,14 +305,17 @@ func TestCanaryPromoteFull(t *testing.T) {
 	f.kubeobjects = append(f.kubeobjects, rs1)
 	f.replicaSetLister = append(f.replicaSetLister, rs1)
 
-	createdRS2Index := f.expectCreateReplicaSetAction(rs2) // create new ReplicaSet (surge to 10)
+	createdRS2Index := f.expectCreateReplicaSetAction(rs2) // create new ReplicaSet (size 0)
 	f.expectUpdateRolloutAction(r2)                        // update rollout revision
 	f.expectUpdateRolloutStatusAction(r2)                  // update rollout conditions
+	updatedRS2Index := f.expectUpdateReplicaSetAction(rs2) // scale new ReplicaSet to 10
 	patchedRolloutIndex := f.expectPatchRolloutAction(r2)
 	f.run(getKey(r2, t))
 
 	createdRS2 := f.getCreatedReplicaSet(createdRS2Index)
-	assert.Equal(t, int32(10), *createdRS2.Spec.Replicas) // verify we ignored steps
+	assert.Equal(t, int32(0), *createdRS2.Spec.Replicas)
+	updatedRS2 := f.getUpdatedReplicaSet(updatedRS2Index)
+	assert.Equal(t, int32(10), *updatedRS2.Spec.Replicas) // verify we ignored steps and fully scaled it
 
 	patchedRollout := f.getPatchedRolloutAsObject(patchedRolloutIndex)
 	assert.Equal(t, int32(2), *patchedRollout.Status.CurrentStepIndex) // verify we updated to last step
@@ -362,7 +366,6 @@ func TestBlueGreenPromoteFull(t *testing.T) {
 	f.replicaSetLister = append(f.replicaSetLister, rs1, rs2)
 
 	f.expectPatchServiceAction(activeSvc, rs2PodHash) // update active to rs2
-	f.expectPatchReplicaSetAction(rs1)                // set scaledown delay on rs1
 	patchRolloutIdx := f.expectPatchRolloutAction(r2) // update rollout status
 	f.run(getKey(r2, t))
 
@@ -374,7 +377,7 @@ func TestBlueGreenPromoteFull(t *testing.T) {
 
 // TestSendStateChangeEvents verifies we emit appropriate events on rollout state changes
 func TestSendStateChangeEvents(t *testing.T) {
-	now := metav1.Now()
+	now := timeutil.MetaNow()
 	tests := []struct {
 		prevStatus           v1alpha1.RolloutStatus
 		newStatus            v1alpha1.RolloutStatus

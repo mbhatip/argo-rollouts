@@ -1,16 +1,9 @@
 package experiments
 
 import (
+	"context"
 	"fmt"
 	"time"
-
-	log "github.com/sirupsen/logrus"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	appslisters "k8s.io/client-go/listers/apps/v1"
 
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	clientset "github.com/argoproj/argo-rollouts/pkg/client/clientset/versioned"
@@ -22,6 +15,17 @@ import (
 	"github.com/argoproj/argo-rollouts/utils/record"
 	replicasetutil "github.com/argoproj/argo-rollouts/utils/replicaset"
 	templateutil "github.com/argoproj/argo-rollouts/utils/template"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
+
+	log "github.com/sirupsen/logrus"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	appslisters "k8s.io/client-go/listers/apps/v1"
+	v1 "k8s.io/client-go/listers/core/v1"
+	"k8s.io/utils/pointer"
 )
 
 const (
@@ -32,14 +36,17 @@ type experimentContext struct {
 	// parameters supplied to the context
 	ex                            *v1alpha1.Experiment
 	templateRSs                   map[string]*appsv1.ReplicaSet
+	templateServices              map[string]*corev1.Service
 	kubeclientset                 kubernetes.Interface
 	argoProjClientset             clientset.Interface
 	analysisTemplateLister        rolloutslisters.AnalysisTemplateLister
 	clusterAnalysisTemplateLister rolloutslisters.ClusterAnalysisTemplateLister
 	analysisRunLister             rolloutslisters.AnalysisRunLister
 	replicaSetLister              appslisters.ReplicaSetLister
+	serviceLister                 v1.ServiceLister
 	recorder                      record.EventRecorder
 	enqueueExperimentAfter        func(obj interface{}, duration time.Duration)
+	resyncPeriod                  time.Duration
 
 	// calculated values during reconciliation
 	log       *log.Entry
@@ -52,27 +59,33 @@ type experimentContext struct {
 func newExperimentContext(
 	experiment *v1alpha1.Experiment,
 	templateRSs map[string]*appsv1.ReplicaSet,
+	templateServices map[string]*corev1.Service,
 	kubeclientset kubernetes.Interface,
 	argoProjClientset clientset.Interface,
 	replicaSetLister appslisters.ReplicaSetLister,
 	analysisTemplateLister rolloutslisters.AnalysisTemplateLister,
 	clusterAnalysisTemplateLister rolloutslisters.ClusterAnalysisTemplateLister,
 	analysisRunLister rolloutslisters.AnalysisRunLister,
+	serviceLister v1.ServiceLister,
 	recorder record.EventRecorder,
+	resyncPeriod time.Duration,
 	enqueueExperimentAfter func(obj interface{}, duration time.Duration),
 ) *experimentContext {
 
 	exCtx := experimentContext{
 		ex:                            experiment,
 		templateRSs:                   templateRSs,
+		templateServices:              templateServices,
 		kubeclientset:                 kubeclientset,
 		argoProjClientset:             argoProjClientset,
 		replicaSetLister:              replicaSetLister,
 		analysisTemplateLister:        analysisTemplateLister,
 		clusterAnalysisTemplateLister: clusterAnalysisTemplateLister,
 		analysisRunLister:             analysisRunLister,
+		serviceLister:                 serviceLister,
 		recorder:                      recorder,
 		enqueueExperimentAfter:        enqueueExperimentAfter,
+		resyncPeriod:                  resyncPeriod,
 
 		log:           log.WithField(logutil.ExperimentKey, experiment.Name).WithField(logutil.NamespaceKey, experiment.Namespace),
 		newStatus:     experiment.Status.DeepCopy(),
@@ -87,7 +100,7 @@ func (ec *experimentContext) reconcile() *v1alpha1.ExperimentStatus {
 	}
 
 	for _, analysis := range ec.ex.Spec.Analyses {
-		ec.reconcileAnalysisRun(analysis)
+		ec.reconcileAnalysisRun(analysis, ec.ex.Spec.DryRun)
 	}
 
 	newStatus := ec.calculateStatus()
@@ -98,7 +111,7 @@ func (ec *experimentContext) reconcile() *v1alpha1.ExperimentStatus {
 	return newStatus
 }
 
-// reconcileTemplate reconciles a template to a ReplicaSet. Creates or scales them down as necessary
+// reconcileTemplate reconciles a template to a ReplicaSet and/or Service. Creates or scales them down as necessary
 // will update status.templateStatuses with the current assessed values
 func (ec *experimentContext) reconcileTemplate(template v1alpha1.TemplateSpec) {
 	logCtx := ec.log.WithField("template", template.Name)
@@ -111,30 +124,37 @@ func (ec *experimentContext) reconcileTemplate(template v1alpha1.TemplateSpec) {
 	}
 	prevStatus := templateStatus.DeepCopy()
 	desiredReplicaCount := experimentutil.CalculateTemplateReplicasCount(ec.ex, template)
-	now := metav1.Now()
+	now := timeutil.MetaNow()
 
 	rs := ec.templateRSs[template.Name]
+
+	// Create ReplicaSet if does not exist
 	if rs == nil {
-		// Create the ReplicaSet if necessary
-		if desiredReplicaCount > 0 {
-			newRS, err := ec.createReplicaSet(template, templateStatus.CollisionCount)
-			if err != nil {
-				logCtx.Warnf("Failed to create ReplicaSet: %v", err)
-				if !k8serrors.IsAlreadyExists(err) {
-					templateStatus.Status = v1alpha1.TemplateStatusError
-					templateStatus.Message = fmt.Sprintf("Failed to create ReplicaSet for template '%s': %v", template.Name, err)
-				}
-			}
-			if newRS != nil {
-				ec.templateRSs[template.Name] = newRS
-				templateStatus.LastTransitionTime = &now
-				rs = newRS
-			}
-		}
+		ec.createReplicaSetForTemplate(template, templateStatus, logCtx, now)
+		rs = ec.templateRSs[template.Name]
 	} else {
+		if template.Service != nil {
+			// Create service for template if service field is set
+			if desiredReplicaCount != 0 {
+				ec.createTemplateService(&template, templateStatus, rs)
+			}
+		} else {
+			// If service field nil but service exists, then delete it
+			// Code should not enter this path
+			svc := ec.templateServices[template.Name]
+			ec.deleteTemplateService(svc, templateStatus, template.Name)
+		}
+
+		// add scaleDownDelaySeconds if replicas will be scaled down
+		if desiredReplicaCount == 0 {
+			ec.addScaleDownDelayToTemplateRS(rs, template.Name)
+			rs = ec.templateRSs[template.Name]
+		}
+
 		// Replicaset exists. We ensure it is scaled properly based on termination, or changed replica count
 		if *rs.Spec.Replicas != desiredReplicaCount {
-			ec.scaleReplicaSetAndRecordEvent(rs, desiredReplicaCount)
+			experimentReplicas := defaults.GetReplicasOrDefault(template.Replicas)
+			ec.scaleTemplateRS(rs, template, templateStatus, desiredReplicaCount, experimentReplicas)
 			templateStatus.LastTransitionTime = &now
 		}
 	}
@@ -208,6 +228,107 @@ func (ec *experimentContext) reconcileTemplate(template v1alpha1.TemplateSpec) {
 	experimentutil.SetTemplateStatus(ec.newStatus, *templateStatus)
 }
 
+func (ec *experimentContext) addScaleDownDelayToTemplateRS(rs *appsv1.ReplicaSet, templateName string) {
+	rsIsUpdated, err := ec.addScaleDownDelay(rs)
+	if err != nil {
+		ec.log.Warnf("Unable to add scaleDownDelay label on rs '%s'", rs.Name)
+	} else {
+		if rsIsUpdated {
+			ctx := context.TODO()
+			rs, err = ec.kubeclientset.AppsV1().ReplicaSets(ec.ex.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
+			if err != nil {
+				ec.log.Warnf("Unable to get rs '%s' with added scaleDownDelay", rs.Name)
+			} else {
+				ec.templateRSs[templateName] = rs
+			}
+		}
+	}
+}
+
+func (ec *experimentContext) scaleTemplateRS(rs *appsv1.ReplicaSet, template v1alpha1.TemplateSpec, templateStatus *v1alpha1.TemplateStatus, desiredReplicaCount int32, experimentReplicas int32) {
+	if desiredReplicaCount == 0 {
+		// Add delay before scaling
+		remainingTime, err := replicasetutil.GetTimeRemainingBeforeScaleDownDeadline(rs)
+		if err != nil {
+			ec.log.Warnf("%v", err)
+		} else if remainingTime != nil {
+			ec.log.Infof("RS '%s' has not reached the scaleDownTime", rs.Name)
+			if *remainingTime < ec.resyncPeriod {
+				ec.enqueueExperimentAfter(ec.ex, *remainingTime)
+			}
+			desiredReplicaCount = experimentReplicas
+		}
+	} else {
+		ctx := context.TODO()
+		updatedRS, err := ec.kubeclientset.AppsV1().ReplicaSets(ec.ex.Namespace).Get(ctx, rs.Name, metav1.GetOptions{})
+		if err != nil {
+			ec.log.Warnf("Unable to get updated rs '%s'", updatedRS.Name)
+		} else {
+			ec.templateRSs[template.Name] = updatedRS
+		}
+		rs = updatedRS
+	}
+	_, _, err := ec.scaleReplicaSetAndRecordEvent(rs, desiredReplicaCount)
+	if err != nil {
+		templateStatus.Status = v1alpha1.TemplateStatusError
+		templateStatus.Message = fmt.Sprintf("Unable to scale ReplicaSet for template '%s' to desired replica count '%v': %v", templateStatus.Name, desiredReplicaCount, err)
+	} else {
+		if desiredReplicaCount == 0 && template.Service != nil {
+			svc := ec.templateServices[template.Name]
+			ec.deleteTemplateService(svc, templateStatus, template.Name)
+		}
+	}
+}
+
+// createServiceTemplate creates service for given experiment template
+func (ec *experimentContext) createTemplateService(template *v1alpha1.TemplateSpec, templateStatus *v1alpha1.TemplateStatus, rs *appsv1.ReplicaSet) {
+	// Create service with has same name, podTemplateHash, and labels as RS
+	podTemplateHash := rs.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]
+	svc := ec.templateServices[template.Name]
+	if svc == nil || svc.Name != rs.Name {
+		newService, err := ec.CreateService(rs.Name, *template, rs.Labels)
+		if err != nil {
+			templateStatus.Status = v1alpha1.TemplateStatusError
+			templateStatus.Message = fmt.Sprintf("Failed to create Service for template '%s': %v", template.Name, err)
+		} else {
+			ec.templateServices[template.Name] = newService
+			templateStatus.ServiceName = newService.Name
+			templateStatus.PodTemplateHash = podTemplateHash
+		}
+	}
+}
+
+// createReplicaSetForTemplate initializes ReplicaSet with zero replicas for given experiment template
+func (ec *experimentContext) createReplicaSetForTemplate(template v1alpha1.TemplateSpec, templateStatus *v1alpha1.TemplateStatus, logCtx *log.Entry, now metav1.Time) {
+	template.Replicas = pointer.Int32Ptr(0)
+	rs, err := ec.createReplicaSet(template, templateStatus.CollisionCount)
+	if err != nil {
+		logCtx.Warnf("Failed to create ReplicaSet: %v", err)
+		if !k8serrors.IsAlreadyExists(err) {
+			templateStatus.Status = v1alpha1.TemplateStatusError
+			templateStatus.Message = fmt.Sprintf("Failed to create ReplicaSet for template '%s': %v", template.Name, err)
+		}
+	}
+	if rs != nil {
+		ec.templateRSs[template.Name] = rs
+		templateStatus.LastTransitionTime = &now
+	}
+}
+
+func (ec *experimentContext) deleteTemplateService(svc *corev1.Service, templateStatus *v1alpha1.TemplateStatus, templateName string) {
+	if svc != nil {
+		err := ec.deleteService(*svc)
+		if err != nil {
+			templateStatus.Status = v1alpha1.TemplateStatusError
+			templateStatus.Message = fmt.Sprintf("Failed to delete Service for template '%s': %v", templateName, err)
+		} else {
+			ec.templateServices[templateName] = nil
+			templateStatus.ServiceName = ""
+			templateStatus.PodTemplateHash = ""
+		}
+	}
+}
+
 // calculateEnqueueDuration returns an appropriate duration to requeue the experiment. This will be
 // the shortest of:
 // * status.availableAt + spec.duration
@@ -228,7 +349,7 @@ func calculateEnqueueDuration(ex *v1alpha1.Experiment, newStatus *v1alpha1.Exper
 		}
 	}
 	deadlineSeconds := defaults.GetExperimentProgressDeadlineSecondsOrDefault(ex)
-	now := time.Now()
+	now := timeutil.Now()
 	for _, template := range ex.Spec.Templates {
 		// Set candidate to the earliest of LastTransitionTime + progressDeadlineSeconds
 		ts := experimentutil.GetTemplateStatus(ex.Status, template.Name)
@@ -250,7 +371,7 @@ func calculateEnqueueDuration(ex *v1alpha1.Experiment, newStatus *v1alpha1.Exper
 
 // reconcileAnalysisRun reconciles a single analysis run, creating or terminating it as necessary.
 // Updates the analysis run statuses, which may subsequently fail the experiment.
-func (ec *experimentContext) reconcileAnalysisRun(analysis v1alpha1.ExperimentAnalysisTemplateRef) {
+func (ec *experimentContext) reconcileAnalysisRun(analysis v1alpha1.ExperimentAnalysisTemplateRef, dryRunMetrics []v1alpha1.DryRun) {
 	logCtx := ec.log.WithField("analysis", analysis.Name)
 	logCtx.Infof("Reconciling analysis")
 	prevStatus := experimentutil.GetAnalysisRunStatus(ec.ex.Status, analysis.Name)
@@ -306,7 +427,7 @@ func (ec *experimentContext) reconcileAnalysisRun(analysis v1alpha1.ExperimentAn
 			logCtx.Warnf("Skipping AnalysisRun creation for analysis %s: experiment is terminating", analysis.Name)
 			return
 		}
-		run, err := ec.createAnalysisRun(analysis)
+		run, err := ec.createAnalysisRun(analysis, dryRunMetrics)
 		if err != nil {
 			msg := fmt.Sprintf("Failed to create AnalysisRun for analysis '%s': %v", analysis.Name, err.Error())
 			newStatus.Phase = v1alpha1.AnalysisPhaseError
@@ -353,13 +474,13 @@ func (ec *experimentContext) reconcileAnalysisRun(analysis v1alpha1.ExperimentAn
 // createAnalysisRun creates the analysis run. If an existing runs exists with same name, is
 // semantically equal, and is not complete, returns the existing one, otherwise creates a new
 // run with a collision counter increase.
-func (ec *experimentContext) createAnalysisRun(analysis v1alpha1.ExperimentAnalysisTemplateRef) (*v1alpha1.AnalysisRun, error) {
+func (ec *experimentContext) createAnalysisRun(analysis v1alpha1.ExperimentAnalysisTemplateRef, dryRunMetrics []v1alpha1.DryRun) (*v1alpha1.AnalysisRun, error) {
 	analysisRunIf := ec.argoProjClientset.ArgoprojV1alpha1().AnalysisRuns(ec.ex.Namespace)
 	args, err := ec.ResolveAnalysisRunArgs(analysis.Args)
 	if err != nil {
 		return nil, err
 	}
-	run, err := ec.newAnalysisRun(analysis, args)
+	run, err := ec.newAnalysisRun(analysis, args, dryRunMetrics)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +512,7 @@ func (ec *experimentContext) calculateStatus() *v1alpha1.ExperimentStatus {
 		templateStatus, templateMessage := ec.assessTemplates()
 		analysesStatus, analysesMessage := ec.assessAnalysisRuns()
 		if templateStatus == v1alpha1.AnalysisPhaseRunning && ec.newStatus.AvailableAt == nil {
-			now := metav1.Now()
+			now := timeutil.MetaNow()
 			ec.newStatus.AvailableAt = &now
 			ec.log.Infof("Marked AvailableAt: %v", now)
 		}
@@ -495,7 +616,7 @@ func (ec *experimentContext) assessAnalysisRuns() (v1alpha1.AnalysisPhase, strin
 }
 
 // newAnalysisRun generates an AnalysisRun from the experiment and template
-func (ec *experimentContext) newAnalysisRun(analysis v1alpha1.ExperimentAnalysisTemplateRef, args []v1alpha1.Argument) (*v1alpha1.AnalysisRun, error) {
+func (ec *experimentContext) newAnalysisRun(analysis v1alpha1.ExperimentAnalysisTemplateRef, args []v1alpha1.Argument, dryRunMetrics []v1alpha1.DryRun) (*v1alpha1.AnalysisRun, error) {
 
 	if analysis.ClusterScope {
 		clusterTemplate, err := ec.clusterAnalysisTemplateLister.Get(analysis.TemplateName)
@@ -504,7 +625,8 @@ func (ec *experimentContext) newAnalysisRun(analysis v1alpha1.ExperimentAnalysis
 		}
 		name := fmt.Sprintf("%s-%s", ec.ex.Name, analysis.Name)
 
-		run, err := analysisutil.NewAnalysisRunFromClusterTemplate(clusterTemplate, args, name, "", ec.ex.Namespace)
+		clusterAnalysisTemplates := []*v1alpha1.ClusterAnalysisTemplate{clusterTemplate}
+		run, err := analysisutil.NewAnalysisRunFromTemplates(nil, clusterAnalysisTemplates, args, dryRunMetrics, name, "", ec.ex.Namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -521,7 +643,8 @@ func (ec *experimentContext) newAnalysisRun(analysis v1alpha1.ExperimentAnalysis
 		}
 		name := fmt.Sprintf("%s-%s", ec.ex.Name, analysis.Name)
 
-		run, err := analysisutil.NewAnalysisRunFromTemplate(template, args, name, "", ec.ex.Namespace)
+		analysisTemplates := []*v1alpha1.AnalysisTemplate{template}
+		run, err := analysisutil.NewAnalysisRunFromTemplates(analysisTemplates, nil, args, dryRunMetrics, name, "", ec.ex.Namespace)
 		if err != nil {
 			return nil, err
 		}

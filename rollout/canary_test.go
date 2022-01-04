@@ -25,6 +25,7 @@ import (
 	logutil "github.com/argoproj/argo-rollouts/utils/log"
 	"github.com/argoproj/argo-rollouts/utils/record"
 	rolloututil "github.com/argoproj/argo-rollouts/utils/rollout"
+	timeutil "github.com/argoproj/argo-rollouts/utils/time"
 )
 
 func newCanaryRollout(name string, replicas int, revisionHistoryLimit *int32, steps []v1alpha1.CanaryStep, stepIndex *int32, maxSurge, maxUnavailable intstr.IntOrString) *v1alpha1.Rollout {
@@ -77,14 +78,18 @@ func TestCanaryRolloutBumpVersion(t *testing.T) {
 	f.replicaSetLister = append(f.replicaSetLister, rs1)
 
 	createdRSIndex := f.expectCreateReplicaSetAction(rs2)
+	updatedRSIndex := f.expectUpdateReplicaSetAction(rs2)                  // scale up RS
 	updatedRolloutRevisionIndex := f.expectUpdateRolloutAction(r2)         // update rollout revision
 	updatedRolloutConditionsIndex := f.expectUpdateRolloutStatusAction(r2) // update rollout conditions
 	f.expectPatchRolloutAction(r2)
 	f.run(getKey(r2, t))
 
 	createdRS := f.getCreatedReplicaSet(createdRSIndex)
-	assert.Equal(t, int32(1), *createdRS.Spec.Replicas)
+	assert.Equal(t, int32(0), *createdRS.Spec.Replicas)
 	assert.Equal(t, "2", createdRS.Annotations[annotations.RevisionAnnotation])
+
+	updatedRS := f.getUpdatedReplicaSet(updatedRSIndex)
+	assert.Equal(t, int32(1), *updatedRS.Spec.Replicas)
 
 	updatedRollout := f.getUpdatedRollout(updatedRolloutRevisionIndex)
 	assert.Equal(t, "2", updatedRollout.Annotations[annotations.RevisionAnnotation])
@@ -173,7 +178,7 @@ func TestCanaryRolloutEnterPauseState(t *testing.T) {
 	}`
 
 	conditions := generateConditionsPatch(true, conditions.ReplicaSetUpdatedReason, r2, false, "")
-	now := metav1.Now().UTC().Format(time.RFC3339)
+	now := timeutil.MetaNow().UTC().Format(time.RFC3339)
 	expectedPatchWithoutObservedGen := fmt.Sprintf(expectedPatchTemplate, v1alpha1.PauseReasonCanaryPauseStep, now, conditions, v1alpha1.PauseReasonCanaryPauseStep)
 	expectedPatch := calculatePatch(r2, expectedPatchWithoutObservedGen)
 	assert.Equal(t, expectedPatch, patch)
@@ -475,6 +480,7 @@ func TestCanaryRolloutCreateFirstReplicasetNoSteps(t *testing.T) {
 	rs := newReplicaSet(r, 1)
 
 	f.expectCreateReplicaSetAction(rs)
+	f.expectUpdateReplicaSetAction(rs) // scale up rs
 	updatedRolloutIndex := f.expectUpdateRolloutStatusAction(r)
 	patchIndex := f.expectPatchRolloutAction(r)
 	f.run(getKey(r, t))
@@ -514,6 +520,7 @@ func TestCanaryRolloutCreateFirstReplicasetWithSteps(t *testing.T) {
 	rs := newReplicaSet(r, 1)
 
 	f.expectCreateReplicaSetAction(rs)
+	f.expectUpdateReplicaSetAction(rs) // scale up rs
 	updatedRolloutIndex := f.expectUpdateRolloutStatusAction(r)
 	patchIndex := f.expectPatchRolloutAction(r)
 	f.run(getKey(r, t))
@@ -559,12 +566,15 @@ func TestCanaryRolloutCreateNewReplicaWithCorrectWeight(t *testing.T) {
 	f.replicaSetLister = append(f.replicaSetLister, rs1)
 
 	createdRSIndex := f.expectCreateReplicaSetAction(rs2)
+	updatedRSIndex := f.expectUpdateReplicaSetAction(rs2)
 	updatedRolloutIndex := f.expectUpdateRolloutStatusAction(r2)
 	f.expectPatchRolloutAction(r2)
 	f.run(getKey(r2, t))
 
 	createdRS := f.getCreatedReplicaSet(createdRSIndex)
-	assert.Equal(t, int32(1), *createdRS.Spec.Replicas)
+	assert.Equal(t, int32(0), *createdRS.Spec.Replicas)
+	updatedRS := f.getUpdatedReplicaSet(updatedRSIndex)
+	assert.Equal(t, int32(1), *updatedRS.Spec.Replicas)
 
 	updatedRollout := f.getUpdatedRollout(updatedRolloutIndex)
 	progressingCondition := conditions.GetRolloutCondition(updatedRollout.Status, v1alpha1.RolloutProgressing)
@@ -695,6 +705,93 @@ func TestCanaryRolloutScaleDownOldRsDontScaleDownTooMuch(t *testing.T) {
 	updatedRS2 := f.getUpdatedReplicaSet(updatedRS2Index)
 	assert.Equal(t, int32(4), *updatedRS2.Spec.Replicas)
 
+}
+
+// TestCanaryDontScaleDownOldRsDuringInterruptedUpdate tests when we need to prevent scale down an
+// intermediate V2 ReplicaSet when applying a V3 spec in the middle of updating a traffic routed
+// canary going from V1 -> V2 (i.e. because we haven't shifted traffic away from V2 yet).
+func TestCanaryDontScaleDownOldRsDuringInterruptedUpdate(t *testing.T) {
+	f := newFixture(t)
+	defer f.Close()
+
+	steps := []v1alpha1.CanaryStep{
+		{
+			SetWeight: pointer.Int32Ptr(100),
+		},
+		{
+			Pause: &v1alpha1.RolloutPause{},
+		},
+	}
+	r1 := newCanaryRollout("foo", 5, nil, steps, pointer.Int32Ptr(1), intstr.FromInt(1), intstr.FromInt(0))
+	r1.Spec.Strategy.Canary.TrafficRouting = &v1alpha1.RolloutTrafficRouting{
+		SMI: &v1alpha1.SMITrafficRouting{},
+	}
+	r1.Spec.Strategy.Canary.StableService = "stable-svc"
+	r1.Spec.Strategy.Canary.CanaryService = "canary-svc"
+	r2 := bumpVersion(r1)
+	r3 := bumpVersion(r2)
+
+	stableSvc := newService("stable-svc", 80, map[string]string{v1alpha1.DefaultRolloutUniqueLabelKey: r1.Status.CurrentPodHash}, r1)
+	canarySvc := newService("canary-svc", 80, map[string]string{v1alpha1.DefaultRolloutUniqueLabelKey: r3.Status.CurrentPodHash}, r3)
+	r3.Status.StableRS = r1.Status.CurrentPodHash
+
+	rs1 := newReplicaSetWithStatus(r1, 5, 5)
+	rs2 := newReplicaSetWithStatus(r2, 5, 5)
+	rs3 := newReplicaSetWithStatus(r3, 5, 0)
+
+	f.objects = append(f.objects, r3)
+	f.kubeobjects = append(f.kubeobjects, rs1, rs2, rs3, canarySvc, stableSvc)
+	f.replicaSetLister = append(f.replicaSetLister, rs1, rs2, rs3)
+	f.serviceLister = append(f.serviceLister, canarySvc, stableSvc)
+
+	f.expectPatchRolloutAction(r3)
+	f.run(getKey(r3, t))
+}
+
+// TestCanaryScaleDownOldRsDuringInterruptedUpdate tests that we proceed with scale down of an
+// intermediate V2 ReplicaSet when applying a V3 spec in the middle of updating a traffic routed
+// canary going from V1 -> V2 (i.e. after we have shifted traffic away from V2). This test is the
+// same as TestCanaryDontScaleDownOldRsDuringUpdate but rs3 is fully available
+func TestCanaryScaleDownOldRsDuringInterruptedUpdate(t *testing.T) {
+	f := newFixture(t)
+	defer f.Close()
+
+	steps := []v1alpha1.CanaryStep{
+		{
+			SetWeight: pointer.Int32Ptr(100),
+		},
+		{
+			Pause: &v1alpha1.RolloutPause{},
+		},
+	}
+	r1 := newCanaryRollout("foo", 5, nil, steps, pointer.Int32Ptr(1), intstr.FromInt(1), intstr.FromInt(0))
+	r1.Spec.Strategy.Canary.TrafficRouting = &v1alpha1.RolloutTrafficRouting{
+		SMI: &v1alpha1.SMITrafficRouting{},
+	}
+	r1.Spec.Strategy.Canary.StableService = "stable-svc"
+	r1.Spec.Strategy.Canary.CanaryService = "canary-svc"
+	r2 := bumpVersion(r1)
+	r3 := bumpVersion(r2)
+
+	stableSvc := newService("stable-svc", 80, map[string]string{v1alpha1.DefaultRolloutUniqueLabelKey: r1.Status.CurrentPodHash}, r1)
+	canarySvc := newService("canary-svc", 80, map[string]string{v1alpha1.DefaultRolloutUniqueLabelKey: r3.Status.CurrentPodHash}, r3)
+	r3.Status.StableRS = r1.Status.CurrentPodHash
+
+	rs1 := newReplicaSetWithStatus(r1, 5, 5)
+	rs2 := newReplicaSetWithStatus(r2, 5, 5)
+	rs3 := newReplicaSetWithStatus(r3, 5, 5)
+
+	f.objects = append(f.objects, r3)
+	f.kubeobjects = append(f.kubeobjects, rs1, rs2, rs3, canarySvc, stableSvc)
+	f.replicaSetLister = append(f.replicaSetLister, rs1, rs2, rs3)
+	f.serviceLister = append(f.serviceLister, canarySvc, stableSvc)
+
+	f.expectPatchRolloutAction(r3)
+	updatedRSIndex := f.expectUpdateReplicaSetAction(rs2)
+	f.run(getKey(r3, t))
+
+	updatedRs2 := f.getUpdatedReplicaSet(updatedRSIndex)
+	assert.Equal(t, int32(0), *updatedRs2.Spec.Replicas)
 }
 
 func TestRollBackToStable(t *testing.T) {
@@ -993,7 +1090,7 @@ func TestSyncRolloutWaitIncrementStepIndex(t *testing.T) {
 	pausedCondition, _ := newPausedCondition(true)
 	conditions.SetRolloutCondition(&r2.Status, pausedCondition)
 
-	earlier := metav1.Now()
+	earlier := timeutil.MetaNow()
 	earlier.Time = earlier.Add(-10 * time.Second)
 	r2.Status.ControllerPause = true
 	r2.Status.PauseConditions = []v1alpha1.PauseCondition{{
@@ -1464,7 +1561,7 @@ func TestHandleCanaryAbort(t *testing.T) {
 
 		r2 = updateCanaryRolloutStatus(r2, rs1PodHash, 10, 1, 10, false)
 		r2.Status.Abort = true
-		now := metav1.Now()
+		now := timeutil.MetaNow()
 		r2.Status.AbortedAt = &now
 		f.rolloutLister = append(f.rolloutLister, r2)
 		f.objects = append(f.objects, r2)
@@ -1501,7 +1598,7 @@ func TestHandleCanaryAbort(t *testing.T) {
 		}
 		r1 := newCanaryRollout("foo", 2, nil, steps, int32Ptr(3), intstr.FromInt(1), intstr.FromInt(0))
 		r1.Status.Abort = true
-		now := metav1.Now()
+		now := timeutil.MetaNow()
 		r1.Status.AbortedAt = &now
 		rs1 := newReplicaSetWithStatus(r1, 2, 2)
 		rs1PodHash := rs1.Labels[v1alpha1.DefaultRolloutUniqueLabelKey]

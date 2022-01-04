@@ -303,7 +303,7 @@ func TestValidateMetrics(t *testing.T) {
 			},
 		}
 		err := ValidateMetrics(spec.Metrics)
-		assert.EqualError(t, err, "metrics[1]: duplicate name 'success-rate")
+		assert.EqualError(t, err, "metrics[1]: duplicate name 'success-rate'")
 	})
 	t.Run("Ensure failureLimit >= 0", func(t *testing.T) {
 		failureLimit := intstr.FromInt(-1)
@@ -379,6 +379,7 @@ func TestValidateMetrics(t *testing.T) {
 						Web:        &v1alpha1.WebMetric{},
 						Datadog:    &v1alpha1.DatadogMetric{},
 						NewRelic:   &v1alpha1.NewRelicMetric{},
+						CloudWatch: &v1alpha1.CloudWatchMetric{},
 					},
 				},
 			},

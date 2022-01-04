@@ -125,7 +125,7 @@ func ValidateMetrics(metrics []v1alpha1.Metric) error {
 	duplicateNames := make(map[string]bool)
 	for i, metric := range metrics {
 		if _, ok := duplicateNames[metric.Name]; ok {
-			return fmt.Errorf("metrics[%d]: duplicate name '%s", i, metric.Name)
+			return fmt.Errorf("metrics[%d]: duplicate name '%s'", i, metric.Name)
 		}
 		duplicateNames[metric.Name] = true
 		if err := ValidateMetric(metric); err != nil {
@@ -204,6 +204,9 @@ func ValidateMetric(metric v1alpha1.Metric) error {
 		numProviders++
 	}
 	if metric.Provider.NewRelic != nil {
+		numProviders++
+	}
+	if metric.Provider.CloudWatch != nil {
 		numProviders++
 	}
 	if numProviders == 0 {
