@@ -14687,6 +14687,17 @@ rules:
   - watch
   - get
   - update
+  - list
+  - patch
+- apiGroups:
+  - route.openshift.io
+  resources:
+  - routes
+  verbs:
+  - watch
+  - get
+  - update
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
