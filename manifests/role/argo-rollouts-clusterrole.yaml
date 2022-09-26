@@ -229,3 +229,12 @@ rules:
   - watch
   - get
   - update
+- apiGroups:
+  - route.openshift.io
+  resources:
+  - routes
+  verbs:
+  - watch
+  - get
+  - update
+  - list

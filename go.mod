@@ -21,6 +21,8 @@ require (
 	github.com/juju/ansiterm v1.0.0
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/newrelic/newrelic-client-go v0.86.5
+	github.com/openshift/api v0.0.0-20210521075222-e273a339932a
+	github.com/openshift/client-go v0.0.0-20210521082421-73d9475a9142
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.12.2-0.20220620141757-4ad265f1b4ee
 	github.com/prometheus/client_model v0.2.0

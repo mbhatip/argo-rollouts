@@ -8,9 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts"
+	routev1 "github.com/openshift/api/route/v1"
+	openshiftclientset "github.com/openshift/client-go/route/clientset/versioned"
 	smiclientset "github.com/servicemeshinterface/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
 	log "github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
@@ -19,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -35,6 +35,7 @@ import (
 	"k8s.io/utils/pointer"
 
 	"github.com/argoproj/argo-rollouts/controller/metrics"
+	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts"
 	register "github.com/argoproj/argo-rollouts/pkg/apis/rollouts"
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/validation"
@@ -93,6 +94,7 @@ type ControllerConfig struct {
 	DynamicClientSet                dynamic.Interface
 	RefResolver                     TemplateRefResolver
 	SmiClientSet                    smiclientset.Interface
+	OpenshiftClientSet              openshiftclientset.Interface
 	ExperimentInformer              informers.ExperimentInformer
 	AnalysisRunInformer             informers.AnalysisRunInformer
 	AnalysisTemplateInformer        informers.AnalysisTemplateInformer
@@ -121,8 +123,9 @@ type reconcilerBase struct {
 	argoprojclientset clientset.Interface
 	// dynamicclientset is a dynamic clientset for interacting with unstructured resources.
 	// It is used to interact with TrafficRouting resources
-	dynamicclientset dynamic.Interface
-	smiclientset     smiclientset.Interface
+	dynamicclientset   dynamic.Interface
+	openshiftclientset openshiftclientset.Interface
+	smiclientset       smiclientset.Interface
 
 	refResolver TemplateRefResolver
 
@@ -180,6 +183,7 @@ func NewController(cfg ControllerConfig) *Controller {
 		argoprojclientset:             cfg.ArgoProjClientset,
 		dynamicclientset:              cfg.DynamicClientSet,
 		smiclientset:                  cfg.SmiClientSet,
+		openshiftclientset:            cfg.OpenshiftClientSet,
 		replicaSetLister:              cfg.ReplicaSetInformer.Lister(),
 		replicaSetSynced:              cfg.ReplicaSetInformer.Informer().HasSynced,
 		rolloutsInformer:              cfg.RolloutsInformer.Informer(),
@@ -582,6 +586,12 @@ func (c *rolloutContext) getRolloutReferencedResources() (*validation.Referenced
 	}
 	refResources.AppMeshResources = appmeshResources
 
+	openshiftRoutes, err := c.getOpenshiftRoutes()
+	if err != nil {
+		return nil, err
+	}
+	refResources.OpenshiftRoutes = openshiftRoutes
+
 	return &refResources, nil
 }
 
@@ -617,6 +627,35 @@ func (c *rolloutContext) getReferencedAppMeshResources() ([]unstructured.Unstruc
 		}
 	}
 	return refResources, nil
+}
+
+func (c *rolloutContext) getOpenshiftRoutes() ([]routev1.Route, error) {
+	routes := []routev1.Route{}
+	if c.rollout.Spec.Strategy.Canary != nil {
+		canary := c.rollout.Spec.Strategy.Canary
+		if canary.TrafficRouting != nil && canary.TrafficRouting.Openshift != nil {
+			a := canary.TrafficRouting.Openshift
+			fldPath := field.NewPath("spec", "strategy", "canary", "trafficRouting", "openshift", "routes")
+			if len(a.Routes) == 0 {
+				return nil, field.Invalid(fldPath, nil, "must provide at least one route")
+			}
+			for _, routeName := range a.Routes {
+
+				c.openshiftclientset.RouteV1()
+				route, err := c.openshiftclientset.RouteV1().
+					Routes(c.rollout.GetNamespace()).
+					Get(context.Background(), routeName, metav1.GetOptions{})
+				if err != nil {
+					if k8serrors.IsNotFound(err) {
+						return nil, field.Invalid(fldPath, routeName, err.Error())
+					}
+					return nil, err
+				}
+				routes = append(routes, *route)
+			}
+		}
+	}
+	return routes, nil
 }
 
 func (c *rolloutContext) getAmbassadorMappings() ([]unstructured.Unstructured, error) {

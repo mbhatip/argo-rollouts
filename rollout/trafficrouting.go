@@ -13,6 +13,7 @@ import (
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/appmesh"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/istio"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/nginx"
+	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/openshift"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/smi"
 	"github.com/argoproj/argo-rollouts/rollout/trafficrouting/traefik"
 	"github.com/argoproj/argo-rollouts/utils/conditions"
@@ -90,6 +91,13 @@ func (c *Controller) NewTrafficRoutingReconciler(roCtx *rolloutContext) ([]traff
 		trafficReconcilers = append(trafficReconcilers, traefik.NewReconciler(&traefik.ReconcilerConfig{
 			Rollout:  rollout,
 			Client:   dynamicClient,
+			Recorder: c.recorder,
+		}))
+	}
+	if rollout.Spec.Strategy.Canary.TrafficRouting.Openshift != nil {
+		trafficReconcilers = append(trafficReconcilers, openshift.NewReconciler(openshift.ReconcilerConfig{
+			Rollout:  rollout,
+			Client:   c.openshiftclientset,
 			Recorder: c.recorder,
 		}))
 	}

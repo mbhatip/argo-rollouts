@@ -1068,6 +1068,19 @@
       },
       "title": "ObjectRef holds a references to the Kubernetes object"
     },
+    "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.OpenshiftTrafficRouting": {
+      "type": "object",
+      "properties": {
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "title": "Openshift route definition"
+        }
+      },
+      "title": "OpenshiftTrafficRouting defines the configuration required to use Openshift routes for traffic"
+    },
     "github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.PauseCondition": {
       "type": "object",
       "properties": {
@@ -1571,6 +1584,10 @@
             "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.MangedRoutes"
           },
           "description": "A list of HTTP routes that Argo Rollouts manages, the order of this array also becomes the precedence in the upstream\ntraffic router."
+        },
+        "openshift": {
+          "$ref": "#/definitions/github.com.argoproj.argo_rollouts.pkg.apis.rollouts.v1alpha1.OpenshiftTrafficRouting",
+          "title": "Openshift holds specific configuration to use routes for traffic"
         }
       },
       "title": "RolloutTrafficRouting hosts all the different configuration for supported service meshes to enable more fine-grained traffic routing"
