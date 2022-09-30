@@ -96,17 +96,30 @@ func (c *Controller) NewTrafficRoutingReconciler(roCtx *rolloutContext) ([]traff
 		}))
 	}
 
-	// ensure that the trafficReconcilers is a healthy list and its not empty
-	if len(trafficReconcilers) > 0 {
-		return trafficReconcilers, nil
+	if rollout.Spec.Strategy.Canary.TrafficRouting.SMI != nil {
+		smi_reconcilier, err := smi.NewReconciler(smi.ReconcilerConfig{
+			Rollout:        rollout,
+			Client:         c.smiclientset,
+			Recorder:       c.recorder,
+			ControllerKind: controllerKind,
+		})
+		if err != nil {
+			return trafficReconcilers, err
+		}
+		trafficReconcilers = append(trafficReconcilers, smi_reconcilier)
 	}
 
 	if rollout.Spec.Strategy.Canary.TrafficRouting.Openshift != nil {
-		return openshift.NewReconciler(openshift.ReconcilerConfig{
+		trafficReconcilers = append(trafficReconcilers, openshift.NewReconciler(openshift.ReconcilerConfig{
 			Rollout:  rollout,
 			Client:   c.openshiftclientset,
 			Recorder: c.recorder,
-		}), nil
+		}))
+	}
+
+	// ensure that the trafficReconcilers is a healthy list and its not empty
+	if len(trafficReconcilers) > 0 {
+		return trafficReconcilers, nil
 	}
 
 	return nil, nil
