@@ -4,11 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"k8s.io/utils/pointer"
-
-	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
-	"github.com/argoproj/argo-rollouts/utils/unstructured"
-	routev1 "github.com/openshift/api/route/v1"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
@@ -22,6 +17,7 @@ import (
 	"github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	ingressutil "github.com/argoproj/argo-rollouts/utils/ingress"
 	"github.com/argoproj/argo-rollouts/utils/unstructured"
+	routev1 "github.com/openshift/api/route/v1"
 )
 
 const successCaseVsvc = `apiVersion: networking.istio.io/v1alpha3
@@ -724,6 +720,70 @@ func TestValidateRolloutVirtualServicesConfig(t *testing.T) {
 	})
 }
 
+func TestValidateOpenshiftRoute(t *testing.T) {
+	rollout := &v1alpha1.Rollout{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+		},
+		Spec: v1alpha1.RolloutSpec{
+			Strategy: v1alpha1.RolloutStrategy{
+				Canary: &v1alpha1.CanaryStrategy{
+					StableService: "stable",
+					CanaryService: "canary",
+					TrafficRouting: &v1alpha1.RolloutTrafficRouting{
+						Openshift: &v1alpha1.OpenshiftTrafficRouting{
+							Routes: []string{"main-route"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("will return error when default backend is not stable service", func(t *testing.T) {
+		//given
+		t.Parallel()
+		route := routev1.Route{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "main-route",
+				Namespace: "default",
+			},
+			Spec: routev1.RouteSpec{
+				To: routev1.RouteTargetReference{
+					Name: "bogus",
+				},
+			},
+		}
+		// when
+		errList := ValidateOpenshiftRoute(rollout, route)
+
+		// then
+		assert.NotNil(t, errList)
+		assert.Equal(t, 1, len(errList))
+	})
+	t.Run("will succeed no matter what initial weight is ", func(t *testing.T) {
+		// given
+		t.Parallel()
+		route := routev1.Route{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "main-route",
+				Namespace: "default",
+			},
+			Spec: routev1.RouteSpec{
+				To: routev1.RouteTargetReference{
+					Name: "stable",
+				},
+			},
+		}
+		// when
+		errList := ValidateOpenshiftRoute(rollout, route)
+
+		// then
+		assert.NotNil(t, errList)
+		assert.Equal(t, 0, len(errList))
+	})
+}
+
 func TestGetAnalysisTemplateWithTypeFieldPath(t *testing.T) {
 	t.Run("get fieldPath for analysisTemplateType PrePromotionAnalysis", func(t *testing.T) {
 		fldPath := GetAnalysisTemplateWithTypeFieldPath(PrePromotionAnalysis, 0)
@@ -914,12 +974,7 @@ spec:
 		})
 	}
 
-<<<<<<< HEAD
 	t.Run("will return error with appmesh virtual-router with unsupported route type", func(t *testing.T) {
-=======
-	t.Run("will return error when default backend is not stable service", func(t *testing.T) {
-		//given
->>>>>>> 5d736e4a (fix: validation for alternateBackends)
 		t.Parallel()
 		manifest := `
 apiVersion: appmesh.k8s.aws/v1beta2
@@ -938,7 +993,6 @@ spec:
 		assert.Len(t, errList, 1)
 		assert.Equal(t, field.NewPath("spec", "routes").Index(0).String(), errList[0].Field)
 	})
-<<<<<<< HEAD
 
 	t.Run("will return error when appmesh virtual-router has route that is not a struct", func(t *testing.T) {
 		t.Parallel()
@@ -958,24 +1012,6 @@ spec:
 		assert.Len(t, errList, 1)
 		assert.Equal(t, field.NewPath("spec", "routes").Index(0).String(), errList[0].Field)
 	})
-=======
-	t.Run("will succeed no matter what initial weight is ", func(t *testing.T) {
-		// given
-		t.Parallel()
-		route := routev1.Route{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "main-route",
-				Namespace: "default",
-			},
-			Spec: routev1.RouteSpec{
-				To: routev1.RouteTargetReference{
-					Name: "stable",
-				},
-			},
-		}
-		// when
-		errList := ValidateOpenshiftRoute(rollout, route)
->>>>>>> 5d736e4a (fix: validation for alternateBackends)
 
 	t.Run("will return error when appmesh virtual-router has routes with no targets", func(t *testing.T) {
 		t.Parallel()

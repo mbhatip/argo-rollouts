@@ -629,8 +629,7 @@ func TestNewTrafficRoutingReconciler(t *testing.T) {
 		tsController := Controller{}
 		r := newCanaryRollout("foo", 10, nil, steps, pointer.Int32Ptr(1), intstr.FromInt(1), intstr.FromInt(0))
 		r.Spec.Strategy.Canary.TrafficRouting = &v1alpha1.RolloutTrafficRouting{
-			AppMesh:   &v1alpha1.AppMeshTrafficRouting{},
-			Openshift: &v1alpha1.OpenshiftTrafficRouting{},
+			AppMesh: &v1alpha1.AppMeshTrafficRouting{},
 		}
 		roCtx := &rolloutContext{
 			rollout: r,
@@ -641,6 +640,23 @@ func TestNewTrafficRoutingReconciler(t *testing.T) {
 			assert.Nil(t, err)
 			assert.NotNil(t, networkReconciler)
 			assert.Equal(t, appmesh.Type, networkReconciler.Type())
+		}
+	}
+	{
+		tsController := Controller{}
+		r := newCanaryRollout("foo", 10, nil, steps, pointer.Int32Ptr(1), intstr.FromInt(1), intstr.FromInt(0))
+		r.Spec.Strategy.Canary.TrafficRouting = &v1alpha1.RolloutTrafficRouting{
+			Openshift: &v1alpha1.OpenshiftTrafficRouting{},
+		}
+		roCtx := &rolloutContext{
+			rollout: r,
+			log:     logutil.WithRollout(r),
+		}
+		networkReconcilerList, err := tsController.NewTrafficRoutingReconciler(roCtx)
+		for _, networkReconciler := range networkReconcilerList {
+			assert.Nil(t, err)
+			assert.NotNil(t, networkReconciler)
+			assert.Equal(t, openshift.Type, networkReconciler.Type())
 		}
 	}
 	{
@@ -664,7 +680,6 @@ func TestNewTrafficRoutingReconciler(t *testing.T) {
 			assert.Nil(t, err)
 			assert.NotNil(t, networkReconciler)
 			assert.Equal(t, traefik.Type, networkReconciler.Type())
-			assert.Equal(t, openshift.Type, networkReconciler.Type())
 		}
 	}
 	{
