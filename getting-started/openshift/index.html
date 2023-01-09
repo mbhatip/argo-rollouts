@@ -2444,7 +2444,7 @@ Watch the rollout through the web <a href="../../dashboard/">dashboard</a>.</p>
 Access the URL to see the live changes to the rollout.</p>
 <div class="admonition tip">
 <p class="admonition-title">Tip</p>
-<p>Your browser may not be showing the traffic shift between different versions once the rollout is promoted. To solve this, disable and clear all cookies for the route URL through your browser settings.</p>
+<p>Your browser may not be showing the traffic shift between different versions once the rollout is promoted. This is because OpenShift have stickyness enabled by default. To solve this, either disable and clear all cookies for the route URL through your browser settings, or see the <a href="https://docs.openshift.com/container-platform/4.11/networking/routes/route-configuration.html#nw-using-cookies-keep-route-statefulness_route-configuration">OpenShift documentation</a> on how to disable stickyness.</p>
 </div>
 <p>The rollout can then be promoted through the CLI or web interface, and the resulting changes should be observable through the route URL.</p>
 
